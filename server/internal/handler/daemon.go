@@ -175,7 +175,25 @@ type DaemonRegisterRequest struct {
 		Type    string `json:"type"`
 		Version string `json:"version"` // agent CLI version (claude/codex)
 		Status  string `json:"status"`
+
+		// RuntimeMode controls how tasks reach the runtime. Defaults to
+		// "local" (the daemon polls /claim). Set to "webhook" to have the
+		// server POST tasks to WebhookURL on assignment instead.
+		RuntimeMode      string `json:"runtime_mode,omitempty"`
+		WebhookURL       string `json:"webhook_url,omitempty"`
+		WebhookSecret    string `json:"webhook_secret,omitempty"`
+		WebhookEventType string `json:"webhook_event_type,omitempty"`
 	} `json:"runtimes"`
+}
+
+// validRuntimeModes enumerates the runtime_mode values the server accepts on
+// register. The DB CHECK constraint enforces the same set, but pre-validating
+// at the handler gives a better error message and avoids a round-trip on bad
+// input.
+var validRuntimeModes = map[string]struct{}{
+	"local":   {},
+	"cloud":   {},
+	"webhook": {},
 }
 
 type daemonWorkspaceReposResponse struct {
@@ -345,17 +363,37 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			"launched_by": req.LaunchedBy,
 		})
 
+		// runtime_mode defaults to "local" so existing daemons that don't
+		// send the field keep their behavior. Validation rejects unknown
+		// values up-front and requires webhook_url when mode='webhook'.
+		runtimeMode := strings.TrimSpace(runtime.RuntimeMode)
+		if runtimeMode == "" {
+			runtimeMode = "local"
+		}
+		if _, ok := validRuntimeModes[runtimeMode]; !ok {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported runtime_mode %q (allowed: local, cloud, webhook)", runtimeMode))
+			return
+		}
+		webhookURL := strings.TrimSpace(runtime.WebhookURL)
+		if runtimeMode == "webhook" && webhookURL == "" {
+			writeError(w, http.StatusBadRequest, "webhook_url is required when runtime_mode='webhook'")
+			return
+		}
+
 		row, err := h.Queries.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
-			WorkspaceID: wsUUID,
-			DaemonID:    strToText(req.DaemonID),
-			Name:        name,
-			RuntimeMode: "local",
-			Provider:    provider,
-			Status:      status,
-			DeviceInfo:  deviceInfo,
-			Metadata:    metadata,
-			OwnerID:     ownerID,
-			Timezone:    normalizeRuntimeTimezone(req.Timezone),
+			WorkspaceID:      wsUUID,
+			DaemonID:         strToText(req.DaemonID),
+			Name:             name,
+			RuntimeMode:      runtimeMode,
+			Provider:         provider,
+			Status:           status,
+			DeviceInfo:       deviceInfo,
+			Metadata:         metadata,
+			OwnerID:          ownerID,
+			Timezone:         normalizeRuntimeTimezone(req.Timezone),
+			WebhookUrl:       strToText(webhookURL),
+			WebhookSecret:    strToText(runtime.WebhookSecret),
+			WebhookEventType: strToText(runtime.WebhookEventType),
 		})
 		if err != nil {
 			h.Analytics.Capture(analytics.RuntimeFailed(
@@ -372,21 +410,24 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		registered := db.AgentRuntime{
-			ID:             row.ID,
-			WorkspaceID:    row.WorkspaceID,
-			DaemonID:       row.DaemonID,
-			Name:           row.Name,
-			RuntimeMode:    row.RuntimeMode,
-			Provider:       row.Provider,
-			Status:         row.Status,
-			DeviceInfo:     row.DeviceInfo,
-			Metadata:       row.Metadata,
-			LastSeenAt:     row.LastSeenAt,
-			CreatedAt:      row.CreatedAt,
-			UpdatedAt:      row.UpdatedAt,
-			OwnerID:        row.OwnerID,
-			LegacyDaemonID: row.LegacyDaemonID,
-			Timezone:       row.Timezone,
+			ID:               row.ID,
+			WorkspaceID:      row.WorkspaceID,
+			DaemonID:         row.DaemonID,
+			Name:             row.Name,
+			RuntimeMode:      row.RuntimeMode,
+			Provider:         row.Provider,
+			Status:           row.Status,
+			DeviceInfo:       row.DeviceInfo,
+			Metadata:         row.Metadata,
+			LastSeenAt:       row.LastSeenAt,
+			CreatedAt:        row.CreatedAt,
+			UpdatedAt:        row.UpdatedAt,
+			OwnerID:          row.OwnerID,
+			LegacyDaemonID:   row.LegacyDaemonID,
+			Timezone:         row.Timezone,
+			WebhookUrl:       row.WebhookUrl,
+			WebhookSecret:    row.WebhookSecret,
+			WebhookEventType: row.WebhookEventType,
 		}
 
 		// Inserted is false for normal daemon reconnects/upserts, so
