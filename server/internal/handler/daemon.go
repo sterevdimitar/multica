@@ -1144,6 +1144,16 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeWorkspaceID := uuidToString(runtime.WorkspaceID)
 	authMs = time.Since(start).Milliseconds()
 
+	// Webhook runtimes don't poll — the server pushes tasks to them on
+	// assignment. Anything that calls /claim against a webhook runtime is
+	// almost certainly a misconfigured caller; surface that loudly rather
+	// than silently returning {"task": nil} forever.
+	if runtime.RuntimeMode == "webhook" {
+		outcome = "webhook_runtime"
+		writeError(w, http.StatusMethodNotAllowed, "this runtime receives tasks via webhook; it does not claim")
+		return
+	}
+
 	claimStart := time.Now()
 	task, err := h.TaskService.ClaimTaskForRuntime(r.Context(), parseUUID(runtimeID))
 	claimMs = time.Since(claimStart).Milliseconds()

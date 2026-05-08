@@ -253,6 +253,50 @@ func TestDaemonRegister_InvalidRuntimeModeRejected(t *testing.T) {
 	}
 }
 
+func TestClaimTaskByRuntime_RejectsWebhookRuntime(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	// Register a webhook runtime via the public path so we exercise the
+	// same row a real caller would create.
+	wReg := httptest.NewRecorder()
+	regBody := map[string]any{
+		"workspace_id": testWorkspaceID,
+		"daemon_id":    "test-daemon-claim-405",
+		"device_name":  "gha",
+		"runtimes": []map[string]any{{
+			"name":         "GHA",
+			"type":         "claude",
+			"version":      "1.0.0",
+			"status":       "online",
+			"runtime_mode": "webhook",
+			"webhook_url":  "https://x.test/dispatch",
+		}},
+	}
+	regReq := newDaemonTokenRequest("POST", "/api/daemon/register", regBody, testWorkspaceID, "test-daemon-claim-405")
+	testHandler.DaemonRegister(wReg, regReq)
+	if wReg.Code != http.StatusOK {
+		t.Fatalf("setup register: %d %s", wReg.Code, wReg.Body.String())
+	}
+	var regResp map[string]any
+	json.NewDecoder(wReg.Body).Decode(&regResp)
+	runtimeID := regResp["runtimes"].([]any)[0].(map[string]any)["id"].(string)
+	defer testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+
+	// Now hit /claim — must be rejected with 405.
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/tasks/claim", nil, testWorkspaceID, "test-daemon-claim-405")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("runtimeId", runtimeID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	testHandler.ClaimTaskByRuntime(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestDaemonRegister_WithDaemonToken_WorkspaceMismatch(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
