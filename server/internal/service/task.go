@@ -433,7 +433,11 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 	// before the queued one (rare but unsafe-by-construction). Publishing
 	// in the desired observe-order makes correctness independent of timing.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
-	s.NotifyTaskEnqueued(ctx, task)
+	// Webhook runtimes get the task pushed to their configured URL; local
+	// runtimes still take the polling path via NotifyTaskEnqueued.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
@@ -486,7 +490,11 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "is_leader_task", isLeader)
 	// See EnqueueTaskForIssue for ordering rationale.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
-	s.NotifyTaskEnqueued(ctx, task)
+	// Webhook runtimes get the task pushed to their configured URL; local
+	// runtimes still take the polling path via NotifyTaskEnqueued.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
@@ -585,7 +593,11 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	// cycle. Without this the user perceives "quick create never
 	// triggered" because the modal closes immediately and the task
 	// sits in 'queued' until the next sleepWithContextOrWakeup tick.
-	s.NotifyTaskEnqueued(ctx, task)
+	//
+	// Webhook runtimes get the task pushed instead.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
@@ -618,7 +630,11 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 	slog.Info("chat task enqueued", "task_id", util.UUIDToString(task.ID), "chat_session_id", util.UUIDToString(chatSession.ID), "agent_id", util.UUIDToString(chatSession.AgentID))
 	// See EnqueueTaskForIssue for ordering rationale.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
-	s.NotifyTaskEnqueued(ctx, task)
+	// Webhook runtimes get the task pushed to their configured URL; local
+	// runtimes still take the polling path via NotifyTaskEnqueued.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
