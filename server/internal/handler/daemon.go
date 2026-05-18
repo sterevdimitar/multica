@@ -96,6 +96,37 @@ func (h *Handler) requireDaemonTaskAccess(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return db.AgentTaskQueue{}, false
 	}
+
+	// Webhook-runtime callback JWTs short-circuit the workspace check.
+	// The token is signed by Multica's own JWT secret, scoped to a
+	// specific (task_id, runtime_id) pair at dispatch time, and expires
+	// in 60min — so possession of the token *is* the authorization for
+	// this specific task. The middleware already validated signature,
+	// expiry, and the "multica-webhook-callback" subject claim. The one
+	// thing left for us to enforce is that the URL's task_id matches
+	// the JWT's claim (otherwise a token issued for task A could be
+	// used against task B's callback endpoint).
+	if middleware.DaemonAuthPathFromContext(r.Context()) == middleware.DaemonAuthPathCallbackJWT {
+		claimTaskID := middleware.CallbackTaskIDFromContext(r.Context())
+		if claimTaskID == "" || claimTaskID != taskID {
+			slog.Warn("daemon_task_access: callback token task_id mismatch",
+				"url_task_id", taskID, "claim_task_id", claimTaskID)
+			writeError(w, http.StatusForbidden, "callback token does not authorize this task")
+			return db.AgentTaskQueue{}, false
+		}
+		task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
+		if err != nil {
+			if isNotFound(err) {
+				writeError(w, http.StatusNotFound, "task not found")
+				return db.AgentTaskQueue{}, false
+			}
+			slog.Warn("get agent task failed", "task_id", taskID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to load task")
+			return db.AgentTaskQueue{}, false
+		}
+		return task, true
+	}
+
 	task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
 	if err != nil {
 		// Only treat pgx.ErrNoRows as a real "task gone" signal — daemon
