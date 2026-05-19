@@ -1112,6 +1112,10 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	// Broadcast
 	s.broadcastTaskEvent(ctx, protocol.EventTaskCompleted, task)
 
+	// Drain the webhook queue: if this agent has capacity, dispatch the
+	// next queued task so the queue doesn't stall until the next enqueue.
+	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
+
 	return &task, nil
 }
 
@@ -1242,6 +1246,10 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 
 	// Broadcast
 	s.broadcastTaskEvent(ctx, protocol.EventTaskFailed, task)
+
+	// Drain the webhook queue: capacity just freed up, dispatch the next
+	// queued task if one exists.
+	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
 
 	return &task, nil
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -82,23 +83,46 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 		return false
 	}
 
+	agent, err := s.Queries.GetAgent(ctx, task.AgentID)
+	if err != nil {
+		slog.Error("webhook: load agent for capacity check", "err", err, "task_id", util.UUIDToString(task.ID))
+		return false
+	}
+	running, err := s.Queries.CountRunningTasks(ctx, task.AgentID)
+	if err != nil {
+		slog.Error("webhook: count running tasks", "err", err, "task_id", util.UUIDToString(task.ID))
+		return false
+	}
+	if running >= int64(agent.MaxConcurrentTasks) {
+		slog.Info("webhook: no capacity, task stays queued",
+			"task_id", util.UUIDToString(task.ID),
+			"agent_id", util.UUIDToString(task.AgentID),
+			"running", running, "max", agent.MaxConcurrentTasks)
+		return true
+	}
+
+	s.dispatchWebhookTask(ctx, task, runtime)
+	return true
+}
+
+// dispatchWebhookTask transitions a queued task to dispatched and fires
+// the webhook POST in a background goroutine. Extracted from
+// MaybeDispatchToWebhook so MaybeDispatchNextQueuedWebhookTask can
+// reuse the same dispatch logic.
+func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTaskQueue, runtime db.AgentRuntime) {
 	taskID := util.UUIDToString(task.ID)
 	runtimeID := util.UUIDToString(runtime.ID)
 
-	// Mark the task as dispatched before firing the webhook so the
-	// receiver's /start callback (which requires status='dispatched')
-	// finds the correct state. If the webhook ultimately fails, the
-	// stale-task sweeper will time out the dispatched row.
 	dispatched, err := s.Queries.DispatchAgentTask(ctx, task.ID)
 	if err != nil {
 		slog.Error("webhook: set task dispatched", "err", err, "task_id", taskID)
-		return false
+		return
 	}
 
 	tok, err := auth.IssueCallbackToken(auth.JWTSecret(), taskID, runtimeID, webhookCallbackTokenTTL)
 	if err != nil {
 		slog.Error("webhook: issue callback token", "err", err, "task_id", taskID)
-		return false
+		return
 	}
 
 	payload := map[string]any{
@@ -113,9 +137,6 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 	}
 
 	go func() {
-		// Detached context — the originating HTTP request may finish
-		// before this dispatch completes; we don't want its cancellation
-		// to abort the outbound POST.
 		dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -128,6 +149,43 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 		}
 		slog.Info("webhook: dispatched", "task_id", taskID, "runtime_id", runtimeID)
 	}()
+}
 
-	return true
+// MaybeDispatchNextQueuedWebhookTask checks whether the agent has
+// capacity for another webhook task after one just completed or failed.
+// If a queued task exists and the agent's max_concurrent_tasks allows
+// it, the task is dispatched immediately. Called from CompleteTask and
+// FailTask so the queue drains without waiting for the next enqueue.
+func (s *TaskService) MaybeDispatchNextQueuedWebhookTask(ctx context.Context, agentID pgtype.UUID) {
+	if os.Getenv("MULTICA_WEBHOOK_RUNTIME") != "1" {
+		return
+	}
+
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		return
+	}
+	if !agent.RuntimeID.Valid {
+		return
+	}
+
+	runtime, err := s.Queries.GetAgentRuntime(ctx, agent.RuntimeID)
+	if err != nil || runtime.RuntimeMode != "webhook" {
+		return
+	}
+
+	running, err := s.Queries.CountRunningTasks(ctx, agentID)
+	if err != nil || running >= int64(agent.MaxConcurrentTasks) {
+		return
+	}
+
+	next, err := s.Queries.FindOldestQueuedTaskForAgent(ctx, agentID)
+	if err != nil {
+		return
+	}
+
+	slog.Info("webhook: draining queue after completion",
+		"task_id", util.UUIDToString(next.ID),
+		"agent_id", util.UUIDToString(agentID))
+	s.dispatchWebhookTask(ctx, next, runtime)
 }

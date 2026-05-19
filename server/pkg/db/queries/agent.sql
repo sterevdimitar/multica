@@ -539,6 +539,33 @@ UPDATE agent SET status = $2, updated_at = now()
 WHERE id = $1
 RETURNING *;
 
+-- name: FindOldestQueuedTaskForAgent :one
+-- Returns the oldest queued task for a webhook agent so the post-completion
+-- drain can dispatch it. Mirrors ClaimAgentTask's per-(issue, agent)
+-- serialization: a task is only eligible when no other task for the same
+-- issue/chat/quick-create AND same agent is already dispatched or running.
+SELECT atq.* FROM agent_task_queue atq
+WHERE atq.agent_id = $1 AND atq.status = 'queued'
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_task_queue active
+      WHERE active.agent_id = atq.agent_id
+        AND active.status IN ('dispatched', 'running')
+        AND (
+          (atq.issue_id IS NOT NULL AND active.issue_id = atq.issue_id)
+          OR (atq.chat_session_id IS NOT NULL AND active.chat_session_id = atq.chat_session_id)
+          OR (
+            atq.issue_id IS NULL
+            AND atq.chat_session_id IS NULL
+            AND atq.autopilot_run_id IS NULL
+            AND active.issue_id IS NULL
+            AND active.chat_session_id IS NULL
+            AND active.autopilot_run_id IS NULL
+          )
+        )
+  )
+ORDER BY atq.priority DESC, atq.created_at ASC
+LIMIT 1;
+
 -- name: RefreshAgentStatusFromTasks :one
 UPDATE agent AS a
 SET status = CASE WHEN EXISTS (
