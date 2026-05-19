@@ -21,6 +21,11 @@ WHERE id = $1 AND workspace_id = $2;
 -- the web UI we don't want a daemon reconnect (which sends its own system
 -- tz) to silently revert it. Daemons can still set the initial value when
 -- they're the first to register a brand-new runtime row.
+--
+-- webhook_url / webhook_secret / webhook_event_type are populated only for
+-- runtime_mode='webhook'; the CHECK constraint on the table enforces that
+-- webhook_url is NOT NULL in that case. They participate in DO UPDATE so a
+-- registered webhook runtime can rotate its URL/secret by re-registering.
 INSERT INTO agent_runtime (
     workspace_id,
     daemon_id,
@@ -32,8 +37,11 @@ INSERT INTO agent_runtime (
     metadata,
     owner_id,
     timezone,
+    webhook_url,
+    webhook_secret,
+    webhook_event_type,
     last_seen_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, @timezone, now())
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, @timezone, $10, $11, $12, now())
 ON CONFLICT (workspace_id, daemon_id, provider)
 DO UPDATE SET
     name = EXCLUDED.name,
@@ -42,9 +50,21 @@ DO UPDATE SET
     device_info = EXCLUDED.device_info,
     metadata = EXCLUDED.metadata,
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
+    webhook_url = EXCLUDED.webhook_url,
+    webhook_secret = EXCLUDED.webhook_secret,
+    webhook_event_type = EXCLUDED.webhook_event_type,
     last_seen_at = now(),
     updated_at = now()
 RETURNING *, (xmax = 0) AS inserted;
+
+-- name: GetWebhookRuntimeConfig :one
+-- Returns just the dispatch fields needed to fire a webhook for a given
+-- runtime. Returns no rows if the runtime is not webhook-mode; callers
+-- should fall back to GetAgentRuntime if they need the full row regardless
+-- of mode.
+SELECT id, workspace_id, webhook_url, webhook_secret, webhook_event_type
+FROM agent_runtime
+WHERE id = $1 AND runtime_mode = 'webhook';
 
 -- name: LockTaskUsageDailyRollup :exec
 -- Serialize explicit timezone rebuilds with rollup_task_usage_daily(), which
