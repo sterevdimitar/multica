@@ -224,6 +224,15 @@ WHERE id = (
 )
 RETURNING *;
 
+-- name: DispatchAgentTask :one
+-- Transitions a specific task from queued to dispatched. Used by the webhook
+-- dispatch path which knows the exact task ID (unlike the daemon claim path
+-- which picks the oldest queued task via ClaimNextTaskForAgent).
+UPDATE agent_task_queue
+SET status = 'dispatched', dispatched_at = now()
+WHERE id = $1 AND status = 'queued'
+RETURNING *;
+
 -- name: StartAgentTask :one
 UPDATE agent_task_queue
 SET status = 'running', started_at = now()

@@ -85,6 +85,16 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 	taskID := util.UUIDToString(task.ID)
 	runtimeID := util.UUIDToString(runtime.ID)
 
+	// Mark the task as dispatched before firing the webhook so the
+	// receiver's /start callback (which requires status='dispatched')
+	// finds the correct state. If the webhook ultimately fails, the
+	// stale-task sweeper will time out the dispatched row.
+	dispatched, err := s.Queries.DispatchAgentTask(ctx, task.ID)
+	if err != nil {
+		slog.Error("webhook: set task dispatched", "err", err, "task_id", taskID)
+		return false
+	}
+
 	tok, err := auth.IssueCallbackToken(auth.JWTSecret(), taskID, runtimeID, webhookCallbackTokenTTL)
 	if err != nil {
 		slog.Error("webhook: issue callback token", "err", err, "task_id", taskID)
@@ -92,7 +102,7 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 	}
 
 	payload := map[string]any{
-		"task":     task,
+		"task":     dispatched,
 		"callback": map[string]any{"url": webhookCallbackBaseURL(), "token": tok},
 	}
 	target := DispatchTarget{
