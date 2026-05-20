@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -38,6 +39,49 @@ func webhookCallbackBaseURL() string {
 		return v + "/api/daemon"
 	}
 	return "http://localhost:8080/api/daemon"
+}
+
+// webhookAgentData mirrors handler.TaskAgentData for the dispatch payload.
+// Defined in the service package to avoid a circular import from handler.
+// Field names and JSON tags match the daemon claim response exactly so
+// the receiver's jq / Go parsing works identically for both paths.
+type webhookAgentData struct {
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Instructions string            `json:"instructions"`
+	Skills       []AgentSkillData  `json:"skills,omitempty"`
+	CustomEnv    map[string]string `json:"custom_env,omitempty"`
+	CustomArgs   []string          `json:"custom_args,omitempty"`
+	McpConfig    json.RawMessage   `json:"mcp_config,omitempty"`
+	Model        string            `json:"model,omitempty"`
+}
+
+// buildWebhookAgentData loads the agent's configuration fields and skills.
+// Mirrors daemon.go:1209-1236 but lives in the service package.
+func (s *TaskService) buildWebhookAgentData(ctx context.Context, agent db.Agent) webhookAgentData {
+	data := webhookAgentData{
+		ID:           util.UUIDToString(agent.ID),
+		Name:         agent.Name,
+		Instructions: agent.Instructions,
+		Model:        agent.Model.String,
+	}
+
+	if agent.CustomEnv != nil {
+		if err := json.Unmarshal(agent.CustomEnv, &data.CustomEnv); err != nil {
+			slog.Warn("webhook: unmarshal custom_env", "agent_id", data.ID, "err", err)
+		}
+	}
+	if agent.CustomArgs != nil {
+		if err := json.Unmarshal(agent.CustomArgs, &data.CustomArgs); err != nil {
+			slog.Warn("webhook: unmarshal custom_args", "agent_id", data.ID, "err", err)
+		}
+	}
+	if agent.McpConfig != nil {
+		data.McpConfig = json.RawMessage(agent.McpConfig)
+	}
+
+	data.Skills = s.LoadAgentSkills(ctx, agent.ID)
+	return data
 }
 
 // webhookHTTPClient is the http.Client used for outbound dispatches. Exposed
@@ -101,7 +145,7 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 		return true
 	}
 
-	s.dispatchWebhookTask(ctx, task, runtime)
+	s.dispatchWebhookTask(ctx, task, runtime, agent)
 	return true
 }
 
@@ -109,7 +153,7 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 // the webhook POST in a background goroutine. Extracted from
 // MaybeDispatchToWebhook so MaybeDispatchNextQueuedWebhookTask can
 // reuse the same dispatch logic.
-func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTaskQueue, runtime db.AgentRuntime) {
+func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTaskQueue, runtime db.AgentRuntime, agent db.Agent) {
 	taskID := util.UUIDToString(task.ID)
 	runtimeID := util.UUIDToString(runtime.ID)
 
@@ -125,8 +169,24 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 		return
 	}
 
+	// Build a map from the dispatched task so we can attach agent data
+	// without changing the top-level wire shape. json.Marshal + Unmarshal
+	// is a one-liner round-trip that keeps the field names in sync with
+	// AgentTaskQueue's column tags automatically.
+	taskBytes, err := json.Marshal(dispatched)
+	if err != nil {
+		slog.Error("webhook: marshal task", "err", err, "task_id", taskID)
+		return
+	}
+	var taskMap map[string]any
+	if err := json.Unmarshal(taskBytes, &taskMap); err != nil {
+		slog.Error("webhook: unmarshal task to map", "err", err, "task_id", taskID)
+		return
+	}
+	taskMap["agent"] = s.buildWebhookAgentData(ctx, agent)
+
 	payload := map[string]any{
-		"task":     dispatched,
+		"task":     taskMap,
 		"callback": map[string]any{"url": webhookCallbackBaseURL(), "token": tok},
 	}
 	target := DispatchTarget{
@@ -187,5 +247,5 @@ func (s *TaskService) MaybeDispatchNextQueuedWebhookTask(ctx context.Context, ag
 	slog.Info("webhook: draining queue after completion",
 		"task_id", util.UUIDToString(next.ID),
 		"agent_id", util.UUIDToString(agentID))
-	s.dispatchWebhookTask(ctx, next, runtime)
+	s.dispatchWebhookTask(ctx, next, runtime, agent)
 }
