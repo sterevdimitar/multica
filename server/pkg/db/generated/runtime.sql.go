@@ -768,6 +768,7 @@ func (q *Queries) RecordRuntimeLegacyDaemonID(ctx context.Context, arg RecordRun
 const selectStaleOnlineRuntimes = `-- name: SelectStaleOnlineRuntimes :many
 SELECT id, workspace_id, owner_id, daemon_id, provider FROM agent_runtime
 WHERE status = 'online'
+  AND runtime_mode != 'webhook'
   AND last_seen_at < now() - make_interval(secs => $1::double precision)
 `
 
@@ -783,6 +784,10 @@ type SelectStaleOnlineRuntimesRow struct {
 // sweeper uses this as a candidate set, then optionally filters via the
 // LivenessStore before flipping rows to offline (a fresh Redis liveness
 // record means the DB row is just lagging, not actually dead).
+//
+// Webhook runtimes are excluded: they are stateless HTTP endpoints with no
+// daemon to heartbeat. Their health is proven per-dispatch; the stale-task
+// sweeper handles individual delivery failures.
 func (q *Queries) SelectStaleOnlineRuntimes(ctx context.Context, staleSeconds float64) ([]SelectStaleOnlineRuntimesRow, error) {
 	rows, err := q.db.Query(ctx, selectStaleOnlineRuntimes, staleSeconds)
 	if err != nil {

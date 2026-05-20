@@ -187,8 +187,13 @@ WHERE id = $1;
 -- sweeper uses this as a candidate set, then optionally filters via the
 -- LivenessStore before flipping rows to offline (a fresh Redis liveness
 -- record means the DB row is just lagging, not actually dead).
+--
+-- Webhook runtimes are excluded: they are stateless HTTP endpoints with no
+-- daemon to heartbeat. Their health is proven per-dispatch; the stale-task
+-- sweeper handles individual delivery failures.
 SELECT id, workspace_id, owner_id, daemon_id, provider FROM agent_runtime
 WHERE status = 'online'
+  AND runtime_mode != 'webhook'
   AND last_seen_at < now() - make_interval(secs => @stale_seconds::double precision);
 
 -- name: MarkRuntimesOfflineByIDs :many
