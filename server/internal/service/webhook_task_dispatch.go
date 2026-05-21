@@ -84,6 +84,67 @@ func (s *TaskService) buildWebhookAgentData(ctx context.Context, agent db.Agent)
 	return data
 }
 
+// webhookIssueData carries the issue context the receiver needs to build a
+// useful prompt. The daemon path relies on `multica issue get <id>` (CLI) to
+// fetch this; webhook runtimes don't have the CLI, so we inline the data.
+type webhookIssueData struct {
+	ID          string               `json:"id"`
+	Title       string               `json:"title"`
+	Description string               `json:"description,omitempty"`
+	Status      string               `json:"status"`
+	Priority    string               `json:"priority"`
+	Comments    []webhookCommentData `json:"comments,omitempty"`
+}
+
+type webhookCommentData struct {
+	AuthorType string `json:"author_type"`
+	Content    string `json:"content"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// webhookMaxIssueComments caps the number of comments included in the
+// dispatch payload to keep the payload size bounded. 20 most recent
+// covers the active conversation without blowing up on long-running issues.
+const webhookMaxIssueComments = 20
+
+// buildWebhookIssueData loads the issue and its recent comments.
+func (s *TaskService) buildWebhookIssueData(ctx context.Context, task db.AgentTaskQueue) *webhookIssueData {
+	if !task.IssueID.Valid {
+		return nil
+	}
+	issue, err := s.Queries.GetIssue(ctx, task.IssueID)
+	if err != nil {
+		slog.Warn("webhook: load issue for context", "issue_id", util.UUIDToString(task.IssueID), "err", err)
+		return nil
+	}
+
+	data := &webhookIssueData{
+		ID:          util.UUIDToString(issue.ID),
+		Title:       issue.Title,
+		Description: issue.Description.String,
+		Status:      issue.Status,
+		Priority:    issue.Priority,
+	}
+
+	comments, err := s.Queries.ListCommentsForIssue(ctx, db.ListCommentsForIssueParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		Limit:       webhookMaxIssueComments,
+	})
+	if err != nil {
+		slog.Warn("webhook: load issue comments", "issue_id", data.ID, "err", err)
+		return data
+	}
+	for _, c := range comments {
+		data.Comments = append(data.Comments, webhookCommentData{
+			AuthorType: c.AuthorType,
+			Content:    c.Content,
+			CreatedAt:  c.CreatedAt.Time.Format("2006-01-02T15:04:05Z"),
+		})
+	}
+	return data
+}
+
 // webhookHTTPClient is the http.Client used for outbound dispatches. Exposed
 // as a package variable so tests can swap in an httptest.NewServer-aware
 // transport, but immutable in production.
@@ -184,6 +245,20 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 		return
 	}
 	taskMap["agent"] = s.buildWebhookAgentData(ctx, agent)
+
+	if issueData := s.buildWebhookIssueData(ctx, dispatched); issueData != nil {
+		taskMap["issue"] = issueData
+	}
+
+	// Load trigger comment content if present (matches daemon.go:1349-1365).
+	if dispatched.TriggerCommentID.Valid {
+		if comment, err := s.Queries.GetComment(ctx, dispatched.TriggerCommentID); err == nil {
+			taskMap["trigger_comment"] = map[string]string{
+				"content":     comment.Content,
+				"author_type": comment.AuthorType,
+			}
+		}
+	}
 
 	payload := map[string]any{
 		"task":     taskMap,
