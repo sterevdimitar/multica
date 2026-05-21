@@ -145,6 +145,55 @@ func (s *TaskService) buildWebhookIssueData(ctx context.Context, task db.AgentTa
 	return data
 }
 
+// webhookPullRequestData carries linked PR metadata so the receiver can
+// tell the agent which branch/commits to review. Sourced from the
+// github_pull_request table via ListPullRequestsByIssue.
+type webhookPullRequestData struct {
+	Number       int32  `json:"number"`
+	Title        string `json:"title"`
+	State        string `json:"state"`
+	HTMLURL      string `json:"html_url"`
+	Branch       string `json:"branch,omitempty"`
+	HeadSHA      string `json:"head_sha,omitempty"`
+	RepoOwner    string `json:"repo_owner"`
+	RepoName     string `json:"repo_name"`
+	Additions    int32  `json:"additions"`
+	Deletions    int32  `json:"deletions"`
+	ChangedFiles int32  `json:"changed_files"`
+}
+
+// buildWebhookPullRequests loads the linked PRs for an issue.
+func (s *TaskService) buildWebhookPullRequests(ctx context.Context, issueID pgtype.UUID) []webhookPullRequestData {
+	if !issueID.Valid {
+		return nil
+	}
+	rows, err := s.Queries.ListPullRequestsByIssue(ctx, issueID)
+	if err != nil {
+		slog.Warn("webhook: load linked PRs", "issue_id", util.UUIDToString(issueID), "err", err)
+		return nil
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	prs := make([]webhookPullRequestData, 0, len(rows))
+	for _, r := range rows {
+		prs = append(prs, webhookPullRequestData{
+			Number:       r.PrNumber,
+			Title:        r.Title,
+			State:        r.State,
+			HTMLURL:      r.HtmlUrl,
+			Branch:       r.Branch.String,
+			HeadSHA:      r.HeadSha,
+			RepoOwner:    r.RepoOwner,
+			RepoName:     r.RepoName,
+			Additions:    r.Additions,
+			Deletions:    r.Deletions,
+			ChangedFiles: r.ChangedFiles,
+		})
+	}
+	return prs
+}
+
 // webhookHTTPClient is the http.Client used for outbound dispatches. Exposed
 // as a package variable so tests can swap in an httptest.NewServer-aware
 // transport, but immutable in production.
@@ -248,6 +297,9 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 
 	if issueData := s.buildWebhookIssueData(ctx, dispatched); issueData != nil {
 		taskMap["issue"] = issueData
+	}
+	if prs := s.buildWebhookPullRequests(ctx, dispatched.IssueID); len(prs) > 0 {
+		taskMap["pull_requests"] = prs
 	}
 
 	// Load trigger comment content if present (matches daemon.go:1349-1365).
