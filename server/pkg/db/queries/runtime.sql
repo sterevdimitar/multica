@@ -42,6 +42,12 @@ WHERE id = $1 AND workspace_id = $2;
 -- (xmax = 0) AS inserted distinguishes a fresh insert (true) from an upsert
 -- that updated an existing row (false). Analytics reads this to fire
 -- runtime_registered/runtime_ready only on first-time registration.
+--
+-- webhook_url / webhook_secret / webhook_event_type are populated only for
+-- runtime_mode='webhook'; the CHECK constraint on the table (migration 202)
+-- enforces that webhook_url is NOT NULL in that case. They participate in
+-- DO UPDATE so a registered webhook runtime can rotate its URL/secret by
+-- re-registering.
 INSERT INTO agent_runtime (
     workspace_id,
     daemon_id,
@@ -52,8 +58,11 @@ INSERT INTO agent_runtime (
     device_info,
     metadata,
     owner_id,
+    webhook_url,
+    webhook_secret,
+    webhook_event_type,
     last_seen_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 -- Built-in runtimes carry no profile_id. The arbiter is the partial unique
 -- index from migration 121 (WHERE profile_id IS NULL); the predicate must be
 -- spelled out so Postgres selects that partial index, not the custom-runtime
@@ -66,9 +75,21 @@ DO UPDATE SET
     device_info = EXCLUDED.device_info,
     metadata = EXCLUDED.metadata,
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
+    webhook_url = EXCLUDED.webhook_url,
+    webhook_secret = EXCLUDED.webhook_secret,
+    webhook_event_type = EXCLUDED.webhook_event_type,
     last_seen_at = now(),
     updated_at = now()
 RETURNING *, (xmax = 0) AS inserted;
+
+-- name: GetWebhookRuntimeConfig :one
+-- Returns just the dispatch fields needed to fire a webhook for a given
+-- runtime. Returns no rows if the runtime is not webhook-mode; callers
+-- should fall back to GetAgentRuntime if they need the full row regardless
+-- of mode.
+SELECT id, workspace_id, webhook_url, webhook_secret, webhook_event_type
+FROM agent_runtime
+WHERE id = $1 AND runtime_mode = 'webhook';
 
 -- name: UpsertAgentRuntimeWithProfile :one
 -- Custom-runtime registration: a daemon resolved a workspace runtime_profile's
@@ -203,8 +224,14 @@ WHERE id = $1;
 -- sweeper uses this as a candidate set, then optionally filters via the
 -- LivenessStore before flipping rows to offline (a fresh Redis liveness
 -- record means the DB row is just lagging, not actually dead).
+--
+-- Webhook runtimes are excluded: they are stateless HTTP endpoints with no
+-- daemon to heartbeat, so they register as online and never refresh
+-- last_seen_at. Their health is proven per-dispatch; the stale-task sweeper
+-- handles individual delivery failures.
 SELECT id, workspace_id, owner_id, daemon_id, provider FROM agent_runtime
 WHERE status = 'online'
+  AND runtime_mode != 'webhook'
   AND last_seen_at < now() - make_interval(secs => @stale_seconds::double precision);
 
 -- name: MarkRuntimesOfflineByIDs :many

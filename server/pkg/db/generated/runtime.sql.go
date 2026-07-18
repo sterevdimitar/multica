@@ -301,7 +301,7 @@ func (q *Queries) FailTasksForOfflineRuntimes(ctx context.Context) ([]AgentTaskQ
 }
 
 const findLegacyRuntimesByDaemonID = `-- name: FindLegacyRuntimesByDaemonID :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type FROM agent_runtime
 WHERE workspace_id = $1
   AND provider = $2
   AND LOWER(daemon_id) = LOWER($3)
@@ -355,6 +355,9 @@ func (q *Queries) FindLegacyRuntimesByDaemonID(ctx context.Context, arg FindLega
 			&i.Visibility,
 			&i.ProfileID,
 			&i.CustomName,
+			&i.WebhookUrl,
+			&i.WebhookSecret,
+			&i.WebhookEventType,
 		); err != nil {
 			return nil, err
 		}
@@ -414,7 +417,7 @@ func (q *Queries) ForceOfflineRuntimesByIDs(ctx context.Context, runtimeIds []pg
 }
 
 const getAgentRuntime = `-- name: GetAgentRuntime :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type FROM agent_runtime
 WHERE id = $1
 `
 
@@ -439,12 +442,15 @@ func (q *Queries) GetAgentRuntime(ctx context.Context, id pgtype.UUID) (AgentRun
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 	)
 	return i, err
 }
 
 const getAgentRuntimeForWorkspace = `-- name: GetAgentRuntimeForWorkspace :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type FROM agent_runtime
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -474,12 +480,15 @@ func (q *Queries) GetAgentRuntimeForWorkspace(ctx context.Context, arg GetAgentR
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 	)
 	return i, err
 }
 
 const getAgentRuntimes = `-- name: GetAgentRuntimes :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type FROM agent_runtime
 WHERE id = ANY($1::uuid[])
 `
 
@@ -515,6 +524,9 @@ func (q *Queries) GetAgentRuntimes(ctx context.Context, ids []pgtype.UUID) ([]Ag
 			&i.Visibility,
 			&i.ProfileID,
 			&i.CustomName,
+			&i.WebhookUrl,
+			&i.WebhookSecret,
+			&i.WebhookEventType,
 		); err != nil {
 			return nil, err
 		}
@@ -526,8 +538,39 @@ func (q *Queries) GetAgentRuntimes(ctx context.Context, ids []pgtype.UUID) ([]Ag
 	return items, nil
 }
 
+const getWebhookRuntimeConfig = `-- name: GetWebhookRuntimeConfig :one
+SELECT id, workspace_id, webhook_url, webhook_secret, webhook_event_type
+FROM agent_runtime
+WHERE id = $1 AND runtime_mode = 'webhook'
+`
+
+type GetWebhookRuntimeConfigRow struct {
+	ID               pgtype.UUID `json:"id"`
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	WebhookUrl       pgtype.Text `json:"webhook_url"`
+	WebhookSecret    pgtype.Text `json:"webhook_secret"`
+	WebhookEventType pgtype.Text `json:"webhook_event_type"`
+}
+
+// Returns just the dispatch fields needed to fire a webhook for a given
+// runtime. Returns no rows if the runtime is not webhook-mode; callers
+// should fall back to GetAgentRuntime if they need the full row regardless
+// of mode.
+func (q *Queries) GetWebhookRuntimeConfig(ctx context.Context, id pgtype.UUID) (GetWebhookRuntimeConfigRow, error) {
+	row := q.db.QueryRow(ctx, getWebhookRuntimeConfig, id)
+	var i GetWebhookRuntimeConfigRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
+	)
+	return i, err
+}
+
 const listAgentRuntimes = `-- name: ListAgentRuntimes :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type FROM agent_runtime
 WHERE workspace_id = $1
 ORDER BY created_at ASC
 `
@@ -559,6 +602,9 @@ func (q *Queries) ListAgentRuntimes(ctx context.Context, workspaceID pgtype.UUID
 			&i.Visibility,
 			&i.ProfileID,
 			&i.CustomName,
+			&i.WebhookUrl,
+			&i.WebhookSecret,
+			&i.WebhookEventType,
 		); err != nil {
 			return nil, err
 		}
@@ -571,7 +617,7 @@ func (q *Queries) ListAgentRuntimes(ctx context.Context, workspaceID pgtype.UUID
 }
 
 const listAgentRuntimesByOwner = `-- name: ListAgentRuntimesByOwner :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type FROM agent_runtime
 WHERE workspace_id = $1 AND owner_id = $2
 ORDER BY created_at ASC
 `
@@ -608,6 +654,9 @@ func (q *Queries) ListAgentRuntimesByOwner(ctx context.Context, arg ListAgentRun
 			&i.Visibility,
 			&i.ProfileID,
 			&i.CustomName,
+			&i.WebhookUrl,
+			&i.WebhookSecret,
+			&i.WebhookEventType,
 		); err != nil {
 			return nil, err
 		}
@@ -687,7 +736,7 @@ func (q *Queries) ListDaemonCustomNames(ctx context.Context, arg ListDaemonCusto
 }
 
 const lockAgentRuntime = `-- name: LockAgentRuntime :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type FROM agent_runtime
 WHERE id = $1
 FOR UPDATE
 `
@@ -727,6 +776,9 @@ func (q *Queries) LockAgentRuntime(ctx context.Context, id pgtype.UUID) (AgentRu
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 	)
 	return i, err
 }
@@ -735,7 +787,7 @@ const markAgentRuntimeOnline = `-- name: MarkAgentRuntimeOnline :one
 UPDATE agent_runtime
 SET status = 'online', last_seen_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type
 `
 
 // Used on the offline→online transition (and on first heartbeat after
@@ -762,6 +814,9 @@ func (q *Queries) MarkAgentRuntimeOnline(ctx context.Context, id pgtype.UUID) (A
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 	)
 	return i, err
 }
@@ -909,6 +964,7 @@ func (q *Queries) RecordRuntimeLegacyDaemonID(ctx context.Context, arg RecordRun
 const selectStaleOnlineRuntimes = `-- name: SelectStaleOnlineRuntimes :many
 SELECT id, workspace_id, owner_id, daemon_id, provider FROM agent_runtime
 WHERE status = 'online'
+  AND runtime_mode != 'webhook'
   AND last_seen_at < now() - make_interval(secs => $1::double precision)
 `
 
@@ -924,6 +980,11 @@ type SelectStaleOnlineRuntimesRow struct {
 // sweeper uses this as a candidate set, then optionally filters via the
 // LivenessStore before flipping rows to offline (a fresh Redis liveness
 // record means the DB row is just lagging, not actually dead).
+//
+// Webhook runtimes are excluded: they are stateless HTTP endpoints with no
+// daemon to heartbeat, so they register as online and never refresh
+// last_seen_at. Their health is proven per-dispatch; the stale-task sweeper
+// handles individual delivery failures.
 func (q *Queries) SelectStaleOnlineRuntimes(ctx context.Context, staleSeconds float64) ([]SelectStaleOnlineRuntimesRow, error) {
 	rows, err := q.db.Query(ctx, selectStaleOnlineRuntimes, staleSeconds)
 	if err != nil {
@@ -1014,7 +1075,7 @@ const updateAgentRuntimeCustomName = `-- name: UpdateAgentRuntimeCustomName :one
 UPDATE agent_runtime
 SET custom_name = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type
 `
 
 type UpdateAgentRuntimeCustomNameParams struct {
@@ -1048,6 +1109,9 @@ func (q *Queries) UpdateAgentRuntimeCustomName(ctx context.Context, arg UpdateAg
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 	)
 	return i, err
 }
@@ -1058,7 +1122,7 @@ SET custom_name = $1, updated_at = now()
 WHERE workspace_id = $2
   AND daemon_id = $3
   AND ($4::uuid IS NULL OR owner_id = $4)
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type
 `
 
 type UpdateAgentRuntimeCustomNameByDaemonParams struct {
@@ -1106,6 +1170,9 @@ func (q *Queries) UpdateAgentRuntimeCustomNameByDaemon(ctx context.Context, arg 
 			&i.Visibility,
 			&i.ProfileID,
 			&i.CustomName,
+			&i.WebhookUrl,
+			&i.WebhookSecret,
+			&i.WebhookEventType,
 		); err != nil {
 			return nil, err
 		}
@@ -1121,7 +1188,7 @@ const updateAgentRuntimeVisibility = `-- name: UpdateAgentRuntimeVisibility :one
 UPDATE agent_runtime
 SET visibility = $1, updated_at = now()
 WHERE id = $2
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type
 `
 
 type UpdateAgentRuntimeVisibilityParams struct {
@@ -1154,6 +1221,9 @@ func (q *Queries) UpdateAgentRuntimeVisibility(ctx context.Context, arg UpdateAg
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 	)
 	return i, err
 }
@@ -1169,8 +1239,11 @@ INSERT INTO agent_runtime (
     device_info,
     metadata,
     owner_id,
+    webhook_url,
+    webhook_secret,
+    webhook_event_type,
     last_seen_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 ON CONFLICT (workspace_id, daemon_id, provider) WHERE profile_id IS NULL
 DO UPDATE SET
     name = EXCLUDED.name,
@@ -1179,47 +1252,62 @@ DO UPDATE SET
     device_info = EXCLUDED.device_info,
     metadata = EXCLUDED.metadata,
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
+    webhook_url = EXCLUDED.webhook_url,
+    webhook_secret = EXCLUDED.webhook_secret,
+    webhook_event_type = EXCLUDED.webhook_event_type,
     last_seen_at = now(),
     updated_at = now()
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, (xmax = 0) AS inserted
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type, (xmax = 0) AS inserted
 `
 
 type UpsertAgentRuntimeParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	DaemonID    pgtype.Text `json:"daemon_id"`
-	Name        string      `json:"name"`
-	RuntimeMode string      `json:"runtime_mode"`
-	Provider    string      `json:"provider"`
-	Status      string      `json:"status"`
-	DeviceInfo  string      `json:"device_info"`
-	Metadata    []byte      `json:"metadata"`
-	OwnerID     pgtype.UUID `json:"owner_id"`
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	DaemonID         pgtype.Text `json:"daemon_id"`
+	Name             string      `json:"name"`
+	RuntimeMode      string      `json:"runtime_mode"`
+	Provider         string      `json:"provider"`
+	Status           string      `json:"status"`
+	DeviceInfo       string      `json:"device_info"`
+	Metadata         []byte      `json:"metadata"`
+	OwnerID          pgtype.UUID `json:"owner_id"`
+	WebhookUrl       pgtype.Text `json:"webhook_url"`
+	WebhookSecret    pgtype.Text `json:"webhook_secret"`
+	WebhookEventType pgtype.Text `json:"webhook_event_type"`
 }
 
 type UpsertAgentRuntimeRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
-	DaemonID       pgtype.Text        `json:"daemon_id"`
-	Name           string             `json:"name"`
-	RuntimeMode    string             `json:"runtime_mode"`
-	Provider       string             `json:"provider"`
-	Status         string             `json:"status"`
-	DeviceInfo     string             `json:"device_info"`
-	Metadata       []byte             `json:"metadata"`
-	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	OwnerID        pgtype.UUID        `json:"owner_id"`
-	LegacyDaemonID pgtype.Text        `json:"legacy_daemon_id"`
-	Visibility     string             `json:"visibility"`
-	ProfileID      pgtype.UUID        `json:"profile_id"`
-	CustomName     pgtype.Text        `json:"custom_name"`
-	Inserted       bool               `json:"inserted"`
+	ID               pgtype.UUID        `json:"id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	DaemonID         pgtype.Text        `json:"daemon_id"`
+	Name             string             `json:"name"`
+	RuntimeMode      string             `json:"runtime_mode"`
+	Provider         string             `json:"provider"`
+	Status           string             `json:"status"`
+	DeviceInfo       string             `json:"device_info"`
+	Metadata         []byte             `json:"metadata"`
+	LastSeenAt       pgtype.Timestamptz `json:"last_seen_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	OwnerID          pgtype.UUID        `json:"owner_id"`
+	LegacyDaemonID   pgtype.Text        `json:"legacy_daemon_id"`
+	Visibility       string             `json:"visibility"`
+	ProfileID        pgtype.UUID        `json:"profile_id"`
+	CustomName       pgtype.Text        `json:"custom_name"`
+	WebhookUrl       pgtype.Text        `json:"webhook_url"`
+	WebhookSecret    pgtype.Text        `json:"webhook_secret"`
+	WebhookEventType pgtype.Text        `json:"webhook_event_type"`
+	Inserted         bool               `json:"inserted"`
 }
 
 // (xmax = 0) AS inserted distinguishes a fresh insert (true) from an upsert
 // that updated an existing row (false). Analytics reads this to fire
 // runtime_registered/runtime_ready only on first-time registration.
+//
+// webhook_url / webhook_secret / webhook_event_type are populated only for
+// runtime_mode='webhook'; the CHECK constraint on the table (migration 202)
+// enforces that webhook_url is NOT NULL in that case. They participate in
+// DO UPDATE so a registered webhook runtime can rotate its URL/secret by
+// re-registering.
 // Built-in runtimes carry no profile_id. The arbiter is the partial unique
 // index from migration 121 (WHERE profile_id IS NULL); the predicate must be
 // spelled out so Postgres selects that partial index, not the custom-runtime
@@ -1235,6 +1323,9 @@ func (q *Queries) UpsertAgentRuntime(ctx context.Context, arg UpsertAgentRuntime
 		arg.DeviceInfo,
 		arg.Metadata,
 		arg.OwnerID,
+		arg.WebhookUrl,
+		arg.WebhookSecret,
+		arg.WebhookEventType,
 	)
 	var i UpsertAgentRuntimeRow
 	err := row.Scan(
@@ -1255,6 +1346,9 @@ func (q *Queries) UpsertAgentRuntime(ctx context.Context, arg UpsertAgentRuntime
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 		&i.Inserted,
 	)
 	return i, err
@@ -1285,7 +1379,7 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, (xmax = 0) AS inserted
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, webhook_url, webhook_secret, webhook_event_type, (xmax = 0) AS inserted
 `
 
 type UpsertAgentRuntimeWithProfileParams struct {
@@ -1302,24 +1396,27 @@ type UpsertAgentRuntimeWithProfileParams struct {
 }
 
 type UpsertAgentRuntimeWithProfileRow struct {
-	ID             pgtype.UUID        `json:"id"`
-	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
-	DaemonID       pgtype.Text        `json:"daemon_id"`
-	Name           string             `json:"name"`
-	RuntimeMode    string             `json:"runtime_mode"`
-	Provider       string             `json:"provider"`
-	Status         string             `json:"status"`
-	DeviceInfo     string             `json:"device_info"`
-	Metadata       []byte             `json:"metadata"`
-	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
-	OwnerID        pgtype.UUID        `json:"owner_id"`
-	LegacyDaemonID pgtype.Text        `json:"legacy_daemon_id"`
-	Visibility     string             `json:"visibility"`
-	ProfileID      pgtype.UUID        `json:"profile_id"`
-	CustomName     pgtype.Text        `json:"custom_name"`
-	Inserted       bool               `json:"inserted"`
+	ID               pgtype.UUID        `json:"id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	DaemonID         pgtype.Text        `json:"daemon_id"`
+	Name             string             `json:"name"`
+	RuntimeMode      string             `json:"runtime_mode"`
+	Provider         string             `json:"provider"`
+	Status           string             `json:"status"`
+	DeviceInfo       string             `json:"device_info"`
+	Metadata         []byte             `json:"metadata"`
+	LastSeenAt       pgtype.Timestamptz `json:"last_seen_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	OwnerID          pgtype.UUID        `json:"owner_id"`
+	LegacyDaemonID   pgtype.Text        `json:"legacy_daemon_id"`
+	Visibility       string             `json:"visibility"`
+	ProfileID        pgtype.UUID        `json:"profile_id"`
+	CustomName       pgtype.Text        `json:"custom_name"`
+	WebhookUrl       pgtype.Text        `json:"webhook_url"`
+	WebhookSecret    pgtype.Text        `json:"webhook_secret"`
+	WebhookEventType pgtype.Text        `json:"webhook_event_type"`
+	Inserted         bool               `json:"inserted"`
 }
 
 // Custom-runtime registration: a daemon resolved a workspace runtime_profile's
@@ -1361,6 +1458,9 @@ func (q *Queries) UpsertAgentRuntimeWithProfile(ctx context.Context, arg UpsertA
 		&i.Visibility,
 		&i.ProfileID,
 		&i.CustomName,
+		&i.WebhookUrl,
+		&i.WebhookSecret,
+		&i.WebhookEventType,
 		&i.Inserted,
 	)
 	return i, err

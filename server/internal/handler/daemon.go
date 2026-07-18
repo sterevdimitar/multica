@@ -114,6 +114,38 @@ func (h *Handler) requireDaemonTaskAccessWithWorkspace(w http.ResponseWriter, r 
 	if !ok {
 		return db.AgentTaskQueue{}, "", false
 	}
+
+	// Webhook-runtime callback JWTs short-circuit the workspace check.
+	// The token is signed by Multica's own JWT secret, scoped to a
+	// specific (task_id, runtime_id) pair at dispatch time, and expires
+	// in ~60min — so possession of the token *is* the authorization for
+	// this specific task. The middleware already validated signature,
+	// expiry, and the "multica-webhook-callback" subject claim. The one
+	// thing left to enforce here is that the URL's task_id matches the
+	// JWT's claim (otherwise a token issued for task A could be used
+	// against task B's callback endpoint).
+	if middleware.DaemonAuthPathFromContext(r.Context()) == middleware.DaemonAuthPathCallbackJWT {
+		claimTaskID := middleware.CallbackTaskIDFromContext(r.Context())
+		if claimTaskID == "" || claimTaskID != taskID {
+			slog.Warn("daemon_task_access: callback token task_id mismatch",
+				"url_task_id", taskID, "claim_task_id", claimTaskID)
+			writeError(w, http.StatusForbidden, "callback token does not authorize this task")
+			return db.AgentTaskQueue{}, "", false
+		}
+		task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
+		if err != nil {
+			if isNotFound(err) {
+				writeError(w, http.StatusNotFound, "task not found")
+				return db.AgentTaskQueue{}, "", false
+			}
+			slog.Warn("get agent task failed", "task_id", taskID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to load task")
+			return db.AgentTaskQueue{}, "", false
+		}
+		wsID := h.TaskService.ResolveTaskWorkspaceID(r.Context(), task)
+		return task, wsID, true
+	}
+
 	task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
 	if err != nil {
 		// Only treat pgx.ErrNoRows as a real "task gone" signal — daemon
@@ -189,12 +221,31 @@ type DaemonRegisterRequest struct {
 		// Type carries the protocol family for both built-in and custom rows
 		// so task routing (agent.New) is unchanged.
 		ProfileID string `json:"profile_id"`
+
+		// RuntimeMode controls how tasks reach the runtime. Defaults to
+		// "local" (the daemon polls /claim). Set to "webhook" to have the
+		// server POST tasks to WebhookURL on assignment instead. Webhook
+		// runtimes register via the built-in (non-profile) path.
+		RuntimeMode      string `json:"runtime_mode,omitempty"`
+		WebhookURL       string `json:"webhook_url,omitempty"`
+		WebhookSecret    string `json:"webhook_secret,omitempty"`
+		WebhookEventType string `json:"webhook_event_type,omitempty"`
 	} `json:"runtimes"`
 	FailedProfiles []struct {
 		ProfileID   string `json:"profile_id"`
 		CommandName string `json:"command_name"`
 		Reason      string `json:"reason"`
 	} `json:"failed_profiles"`
+}
+
+// validRuntimeModes enumerates the runtime_mode values the server accepts on
+// register. The DB CHECK constraint (migrations 202/203) enforces the same
+// set; pre-validating at the handler gives a better error and avoids a
+// round-trip on bad input.
+var validRuntimeModes = map[string]struct{}{
+	"local":   {},
+	"cloud":   {},
+	"webhook": {},
 }
 
 type daemonWorkspaceReposResponse struct {
@@ -489,16 +540,37 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				ProfileID:      prow.ProfileID,
 			}
 		} else {
+			// runtime_mode defaults to "local" so existing daemons that
+			// don't send the field keep their behavior. Validation rejects
+			// unknown values up-front and requires webhook_url when
+			// mode='webhook'.
+			runtimeMode := strings.TrimSpace(runtime.RuntimeMode)
+			if runtimeMode == "" {
+				runtimeMode = "local"
+			}
+			if _, okMode := validRuntimeModes[runtimeMode]; !okMode {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported runtime_mode %q (allowed: local, cloud, webhook)", runtimeMode))
+				return
+			}
+			webhookURL := strings.TrimSpace(runtime.WebhookURL)
+			if runtimeMode == "webhook" && webhookURL == "" {
+				writeError(w, http.StatusBadRequest, "webhook_url is required when runtime_mode='webhook'")
+				return
+			}
+
 			row, err := h.Queries.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
-				WorkspaceID: wsUUID,
-				DaemonID:    strToText(req.DaemonID),
-				Name:        name,
-				RuntimeMode: "local",
-				Provider:    provider,
-				Status:      status,
-				DeviceInfo:  deviceInfo,
-				Metadata:    metadata,
-				OwnerID:     ownerID,
+				WorkspaceID:      wsUUID,
+				DaemonID:         strToText(req.DaemonID),
+				Name:             name,
+				RuntimeMode:      runtimeMode,
+				Provider:         provider,
+				Status:           status,
+				DeviceInfo:       deviceInfo,
+				Metadata:         metadata,
+				OwnerID:          ownerID,
+				WebhookUrl:       strToText(webhookURL),
+				WebhookSecret:    strToText(runtime.WebhookSecret),
+				WebhookEventType: strToText(runtime.WebhookEventType),
 			})
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
@@ -515,23 +587,26 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			}
 			inserted = row.Inserted
 			registered = db.AgentRuntime{
-				ID:             row.ID,
-				WorkspaceID:    row.WorkspaceID,
-				DaemonID:       row.DaemonID,
-				Name:           row.Name,
-				CustomName:     row.CustomName,
-				RuntimeMode:    row.RuntimeMode,
-				Provider:       row.Provider,
-				Status:         row.Status,
-				DeviceInfo:     row.DeviceInfo,
-				Metadata:       row.Metadata,
-				LastSeenAt:     row.LastSeenAt,
-				CreatedAt:      row.CreatedAt,
-				UpdatedAt:      row.UpdatedAt,
-				OwnerID:        row.OwnerID,
-				LegacyDaemonID: row.LegacyDaemonID,
-				Visibility:     row.Visibility,
-				ProfileID:      row.ProfileID,
+				ID:               row.ID,
+				WorkspaceID:      row.WorkspaceID,
+				DaemonID:         row.DaemonID,
+				Name:             row.Name,
+				CustomName:       row.CustomName,
+				RuntimeMode:      row.RuntimeMode,
+				Provider:         row.Provider,
+				Status:           row.Status,
+				DeviceInfo:       row.DeviceInfo,
+				Metadata:         row.Metadata,
+				LastSeenAt:       row.LastSeenAt,
+				CreatedAt:        row.CreatedAt,
+				UpdatedAt:        row.UpdatedAt,
+				OwnerID:          row.OwnerID,
+				LegacyDaemonID:   row.LegacyDaemonID,
+				Visibility:       row.Visibility,
+				ProfileID:        row.ProfileID,
+				WebhookUrl:       row.WebhookUrl,
+				WebhookSecret:    row.WebhookSecret,
+				WebhookEventType: row.WebhookEventType,
 			}
 		}
 
@@ -2444,6 +2519,16 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 	runtimeWorkspaceID := uuidToString(runtime.WorkspaceID)
 	authMs = time.Since(start).Milliseconds()
+
+	// Webhook runtimes don't poll — the server pushes tasks to them on
+	// assignment. Anything that calls /claim against a webhook runtime is
+	// almost certainly a misconfigured caller; surface that loudly rather
+	// than silently returning {"task": nil} forever.
+	if runtime.RuntimeMode == "webhook" {
+		outcome = "webhook_runtime"
+		writeError(w, http.StatusMethodNotAllowed, "this runtime receives tasks via webhook; it does not claim")
+		return
+	}
 
 	claimStart := time.Now()
 	task, err := h.TaskService.ClaimTaskForRuntime(r.Context(), parseUUID(runtimeID))

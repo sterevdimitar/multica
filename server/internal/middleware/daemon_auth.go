@@ -20,6 +20,8 @@ const (
 	ctxKeyDaemonWorkspaceID daemonContextKey = iota
 	ctxKeyDaemonID
 	ctxKeyDaemonAuthPath
+	ctxKeyCallbackTaskID
+	ctxKeyCallbackRuntimeID
 )
 
 // Daemon auth path labels exposed via context for slow-log attribution.
@@ -28,6 +30,12 @@ const (
 	DaemonAuthPathPAT         = "pat"
 	DaemonAuthPathCloudPAT    = "cloud_pat"
 	DaemonAuthPathJWT         = "jwt"
+	// DaemonAuthPathCallbackJWT means the request authenticated with a
+	// per-task webhook-runtime callback JWT. The task_id and runtime_id
+	// claims are available via CallbackTaskIDFromContext and
+	// CallbackRuntimeIDFromContext; handlers MUST enforce that the URL's
+	// task_id matches the claim.
+	DaemonAuthPathCallbackJWT = "callback_jwt"
 )
 
 // DaemonWorkspaceIDFromContext returns the workspace ID set by DaemonAuth middleware.
@@ -48,6 +56,30 @@ func DaemonIDFromContext(ctx context.Context) string {
 func DaemonAuthPathFromContext(ctx context.Context) string {
 	p, _ := ctx.Value(ctxKeyDaemonAuthPath).(string)
 	return p
+}
+
+// CallbackTaskIDFromContext returns the task_id claim from the callback
+// JWT set by DaemonAuth, or "" when the request didn't authenticate via a
+// callback token. Handlers use this to enforce the URL ↔ token binding.
+func CallbackTaskIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(ctxKeyCallbackTaskID).(string)
+	return id
+}
+
+// CallbackRuntimeIDFromContext returns the runtime_id claim from the
+// callback JWT set by DaemonAuth, or "".
+func CallbackRuntimeIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(ctxKeyCallbackRuntimeID).(string)
+	return id
+}
+
+// WithCallbackContext is the test seam for simulating a callback-JWT-
+// authenticated request without exercising the JWT machinery.
+func WithCallbackContext(ctx context.Context, taskID, runtimeID string) context.Context {
+	ctx = context.WithValue(ctx, ctxKeyCallbackTaskID, taskID)
+	ctx = context.WithValue(ctx, ctxKeyCallbackRuntimeID, runtimeID)
+	ctx = context.WithValue(ctx, ctxKeyDaemonAuthPath, DaemonAuthPathCallbackJWT)
+	return ctx
 }
 
 // WithDaemonContext returns a new context with the daemon workspace ID and daemon ID set.
@@ -222,6 +254,26 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 				go queries.UpdatePersonalAccessTokenLastUsed(context.Background(), pat.ID)
 
 				ctx := context.WithValue(r.Context(), ctxKeyDaemonAuthPath, DaemonAuthPathPAT)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// Fallback: webhook-runtime callback JWT.
+			//
+			// ParseCallbackToken validates signature + expiry + the
+			// "multica-webhook-callback" subject — the subject check is
+			// what distinguishes a callback token from any other HS256
+			// JWT signed by the same secret. We try it before the generic
+			// user-JWT path below so a callback token is never silently
+			// treated as a user session (sub="<uuid>") and used to set
+			// X-User-ID.
+			//
+			// Handlers that serve callback endpoints MUST verify the URL's
+			// task_id matches the JWT's claim (see requireDaemonTaskAccess).
+			if claims, err := auth.ParseCallbackToken(auth.JWTSecret(), tokenString); err == nil {
+				ctx := context.WithValue(r.Context(), ctxKeyCallbackTaskID, claims.TaskID)
+				ctx = context.WithValue(ctx, ctxKeyCallbackRuntimeID, claims.RuntimeID)
+				ctx = context.WithValue(ctx, ctxKeyDaemonAuthPath, DaemonAuthPathCallbackJWT)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}

@@ -1050,7 +1050,11 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	// before the queued one (rare but unsafe-by-construction). Publishing
 	// in the desired observe-order makes correctness independent of timing.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
-	s.NotifyTaskEnqueued(ctx, task)
+	// Webhook runtimes get the task pushed to their configured URL; local
+	// runtimes still take the polling path via NotifyTaskEnqueued.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
@@ -1159,7 +1163,11 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "is_leader_task", isLeader)
 	// See EnqueueTaskForIssue for ordering rationale.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
-	s.NotifyTaskEnqueued(ctx, task)
+	// Webhook runtimes get the task pushed to their configured URL; local
+	// runtimes still take the polling path via NotifyTaskEnqueued.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
@@ -1376,7 +1384,11 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 	// cycle. Without this the user perceives "quick create never
 	// triggered" because the modal closes immediately and the task
 	// sits in 'queued' until the next sleepWithContextOrWakeup tick.
-	s.NotifyTaskEnqueued(ctx, task)
+	//
+	// Webhook runtimes get the task pushed to their configured URL instead.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
@@ -1476,7 +1488,11 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 	slog.Info("chat task enqueued", "task_id", util.UUIDToString(task.ID), "chat_session_id", util.UUIDToString(chatSession.ID), "agent_id", util.UUIDToString(chatSession.AgentID))
 	// See EnqueueTaskForIssue for ordering rationale.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
-	s.NotifyTaskEnqueued(ctx, task)
+	// Webhook runtimes get the task pushed to their configured URL; local
+	// runtimes still take the polling path via NotifyTaskEnqueued.
+	if !s.MaybeDispatchToWebhook(ctx, task) {
+		s.NotifyTaskEnqueued(ctx, task)
+	}
 	return task, nil
 }
 
@@ -2742,6 +2758,10 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	// Broadcast
 	s.broadcastTaskEvent(ctx, protocol.EventTaskCompleted, task)
 
+	// Drain the webhook queue: if this agent has capacity, dispatch the
+	// next queued task so the queue doesn't stall until the next enqueue.
+	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
+
 	return &task, nil
 }
 
@@ -3104,6 +3124,10 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 
 	// Broadcast
 	s.broadcastTaskEvent(ctx, protocol.EventTaskFailed, task)
+
+	// Drain the webhook queue: capacity just freed up, dispatch the next
+	// queued task if one exists.
+	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
 
 	return &task, nil
 }
