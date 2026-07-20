@@ -1,10 +1,14 @@
--- 080_agent_webhook_runtime_mode: extend agent.runtime_mode CHECK to include 'webhook'.
+-- 203_agent_webhook_runtime_mode: extend agent.runtime_mode CHECK to include 'webhook'.
 --
--- Migration 079 added 'webhook' to agent_runtime.runtime_mode_check but left
+-- Migration 202 added 'webhook' to agent_runtime.runtime_mode_check but left
 -- the separate CHECK on the agent table at ('local', 'cloud'). Creating an
 -- agent bound to a webhook runtime fails with agent_runtime_mode_check
 -- (SQLSTATE 23514). This was patched live on the GCP DB via ALTER; this
 -- migration makes it survive a from-scratch rebuild.
+--
+-- Idempotent: the drop-loop below removes whatever runtime_mode CHECK exists
+-- (any name, any normalization) before re-adding, so re-running is safe.
+-- Numbered 080 before the v0.4.4 rebase (2026-07-20).
 
 DO $$
 DECLARE
