@@ -273,6 +273,35 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 		return
 	}
 
+	// Record the delivery receipt so completion reconciliation
+	// (reconcileCommentsOnCompletion) skips the comments this dispatch conveyed —
+	// most importantly the task's own trigger comment. The daemon claim path
+	// records this via FinalizeTaskClaim; the webhook path must do the same, or
+	// every completion replays the trigger comment as a fresh task, an unbounded
+	// duplicate-task loop that burns quota (each new webhook task re-triggers on
+	// its own completion). The set mirrors reconcile's planned set: the trigger
+	// comment plus any coalesced comment ids, all of which the payload conveys
+	// (trigger_comment content + the recent issue-comments context). The subset
+	// guard in SetTaskDeliveredCommentIDs permits exactly these ids, and the CAS
+	// matches because the task is dispatched with started_at still NULL — this
+	// runs before the POST goroutine, so the receiver cannot have started yet.
+	if dispatched.TriggerCommentID.Valid || len(dispatched.CoalescedCommentIds) > 0 {
+		delivered := make([]pgtype.UUID, 0, len(dispatched.CoalescedCommentIds)+1)
+		if dispatched.TriggerCommentID.Valid {
+			delivered = append(delivered, dispatched.TriggerCommentID)
+		}
+		delivered = append(delivered, dispatched.CoalescedCommentIds...)
+		if _, err := s.Queries.SetTaskDeliveredCommentIDs(ctx, db.SetTaskDeliveredCommentIDsParams{
+			DeliveredCommentIds:      delivered,
+			TaskID:                   dispatched.ID,
+			RuntimeID:                dispatched.RuntimeID,
+			DispatchedAt:             dispatched.DispatchedAt,
+			ExpectedTriggerCommentID: dispatched.TriggerCommentID,
+		}); err != nil {
+			slog.Error("webhook: record delivery receipt", "err", err, "task_id", taskID)
+		}
+	}
+
 	tok, err := auth.IssueCallbackToken(auth.JWTSecret(), taskID, runtimeID, webhookCallbackTokenTTL)
 	if err != nil {
 		slog.Error("webhook: issue callback token", "err", err, "task_id", taskID)

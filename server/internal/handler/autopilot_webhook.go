@@ -559,6 +559,27 @@ func (h *Handler) HandleAutopilotWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// 10b. FORK GUARD (LEAK 2): GitHub's webhook health-check `ping` (sent on hook
+	//      creation) carries no repository payload but was admitted as a full
+	//      (billed) review run that reviewed nothing. Drop universally
+	//      non-actionable GitHub events here — recording an ignored delivery and
+	//      returning 200 so GitHub does not mark the hook as failing and keep
+	//      retrying. Non-GitHub deliveries (no X-GitHub-Event header) are
+	//      unaffected; a per-trigger allowlist (e.g. pull_request
+	//      opened/synchronize/reopened) is expressed via event_filters (step 10).
+	if actionable, ghEvent := githubDeliveryIsActionable(r.Header); !actionable {
+		respBody := map[string]any{
+			"status":       "ignored",
+			"delivery_id":  uuidToString(delivery.ID),
+			"reason":       "github_event_not_actionable",
+			"github_event": ghEvent,
+			"event":        envelope.Event,
+		}
+		h.finaliseDeliveryTerminal(r, delivery.ID, deliveryStatusIgnored, http.StatusOK, respBody, "github_event_not_actionable")
+		writeJSON(w, http.StatusOK, respBody)
+		return
+	}
+
 	// 11. Allocate the idempotent run synchronously so existing webhook clients
 	//     keep the v0.4.0 response contract. The queued delivery remains the
 	//     durable dispatch source: the worker resumes this run after the response
@@ -710,6 +731,40 @@ func webhookEventAllowedByTriggerScope(eventFilters []byte, envelope WebhookEnve
 		// Keep scanning so any later filter still gets its chance.
 	}
 	return false
+}
+
+// githubNonActionableEvents are GitHub webhook events that can never carry work
+// for an autopilot and so must never spawn a (billed) run (LEAK 2). `ping` is
+// GitHub's webhook health-check, delivered once when a hook is created and on
+// demand; it carries only `zen`/`hook_id`, no repository payload — yet without
+// this guard it admitted a full review run that reviewed nothing. This is a
+// UNIVERSAL drop, independent of the trigger's event_filters, because no
+// autopilot can meaningfully act on a ping. It is deliberately NOT a general
+// "pull_request only" allowlist: upstream supports autopilots driven by
+// workflow_run, check_suite, and other GitHub events through event_filters, and
+// hard-coding pull_request-only here would silently break them. To restrict a
+// specific trigger (e.g. the review pipeline) to pull_request
+// opened/synchronize/reopened, set its event_filters — the scope check above
+// enforces that per trigger.
+var githubNonActionableEvents = map[string]bool{
+	"ping": true,
+}
+
+// githubDeliveryIsActionable reports whether a GitHub webhook delivery should be
+// admitted, plus the X-GitHub-Event value for logging / the ignored response. A
+// delivery with no X-GitHub-Event header is not a GitHub delivery and is always
+// actionable here (its scope is governed solely by the per-trigger
+// event_filters). A GitHub delivery is dropped only when its event is
+// universally non-actionable (see githubNonActionableEvents).
+func githubDeliveryIsActionable(headers http.Header) (bool, string) {
+	ghEvent := strings.TrimSpace(headers.Get("X-GitHub-Event"))
+	if ghEvent == "" {
+		return true, ""
+	}
+	if githubNonActionableEvents[ghEvent] {
+		return false, ghEvent
+	}
+	return true, ghEvent
 }
 
 // splitWebhookEvent splits a normalized event like "github.workflow_run.completed"
