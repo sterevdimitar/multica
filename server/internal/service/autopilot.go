@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1652,6 +1653,21 @@ func (s *AutopilotService) buildIssueDescription(ap db.Autopilot, run db.Autopil
 				}
 			}
 		}
+		b.WriteString("\n\nWebhook event: ")
+		b.WriteString(event)
+
+		// A GitHub pull_request payload is ~30 KB of JSON, almost all of it
+		// API links nobody follows. Rendering the PR itself instead gives
+		// the humans watching the board something readable and gives the
+		// agent the one link it actually needs, in one place instead of
+		// buried. Every other event keeps the raw dump — it is the agent's
+		// only channel for event context (see the doc comment above) and we
+		// have no provider knowledge to summarise it with.
+		if pr, ok := parseGitHubPullRequest(event, env.EventPayload); ok {
+			writePullRequestSummary(&b, pr)
+			return pgtype.Text{String: b.String(), Valid: true}
+		}
+
 		if len(payloadJSON) == 0 {
 			if pretty, err := prettifyJSON(run.TriggerPayload); err == nil {
 				payloadJSON = pretty
@@ -1659,14 +1675,137 @@ func (s *AutopilotService) buildIssueDescription(ap db.Autopilot, run db.Autopil
 				payloadJSON = run.TriggerPayload
 			}
 		}
-		b.WriteString("\n\nWebhook event: ")
-		b.WriteString(event)
 		b.WriteString("\n\nWebhook payload:\n```json\n")
 		b.Write(payloadJSON)
 		b.WriteString("\n```")
 	}
 
 	return pgtype.Text{String: b.String(), Valid: true}
+}
+
+// maxIssuePRBodyBytes caps how much of a pull request's own description is
+// copied into the issue. PR bodies are unbounded; one runaway description
+// would otherwise bloat the issue row for everyone looking at the board.
+// The full text is always one click away via the link.
+const maxIssuePRBodyBytes = 20000
+
+// githubPullRequest is the handful of fields worth surfacing from a GitHub
+// pull_request webhook. Everything else in the payload is either an API
+// link or metadata no reviewer reads.
+type githubPullRequest struct {
+	Repo    string
+	Number  int
+	URL     string
+	Title   string
+	Author  string
+	Head    string
+	Base    string
+	Action  string
+	Body    string
+	IsDraft bool
+}
+
+// parseGitHubPullRequest reports whether this envelope is a GitHub
+// pull_request event carrying a usable pull request, and extracts it.
+//
+// The event name alone is deliberately NOT sufficient. An envelope can
+// name pull_request while carrying no pull_request object at all, and
+// rendering a header full of blank fields would be strictly worse than the
+// raw dump it replaced. Both the event name and a resolvable URL are
+// required; anything else falls through to the existing behaviour.
+func parseGitHubPullRequest(event string, payload json.RawMessage) (githubPullRequest, bool) {
+	if !strings.HasPrefix(event, "github.pull_request") || len(payload) == 0 {
+		return githubPullRequest{}, false
+	}
+	var ev struct {
+		Action      string `json:"action"`
+		Number      int    `json:"number"`
+		PullRequest *struct {
+			HTMLURL string `json:"html_url"`
+			Title   string `json:"title"`
+			Body    string `json:"body"`
+			Draft   bool   `json:"draft"`
+			User    struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Head struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+			Base struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
+		} `json:"pull_request"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(payload, &ev); err != nil || ev.PullRequest == nil {
+		return githubPullRequest{}, false
+	}
+	if strings.TrimSpace(ev.PullRequest.HTMLURL) == "" {
+		return githubPullRequest{}, false
+	}
+	return githubPullRequest{
+		Repo:    ev.Repository.FullName,
+		Number:  ev.Number,
+		URL:     ev.PullRequest.HTMLURL,
+		Title:   ev.PullRequest.Title,
+		Author:  ev.PullRequest.User.Login,
+		Head:    ev.PullRequest.Head.Ref,
+		Base:    ev.PullRequest.Base.Ref,
+		Action:  ev.Action,
+		Body:    ev.PullRequest.Body,
+		IsDraft: ev.PullRequest.Draft,
+	}, true
+}
+
+// writePullRequestSummary renders the PR header and the PR's own
+// description. The link comes first and on its own line so it survives
+// every downstream truncation an issue list might apply.
+func writePullRequestSummary(b *strings.Builder, pr githubPullRequest) {
+	label := pr.URL
+	if pr.Repo != "" && pr.Number > 0 {
+		label = fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
+	}
+	fmt.Fprintf(b, "\n\n**Pull request:** [%s](%s)", label, pr.URL)
+	if t := strings.TrimSpace(pr.Title); t != "" {
+		fmt.Fprintf(b, "\n**Title:** %s", t)
+	}
+
+	var meta []string
+	if pr.Author != "" {
+		meta = append(meta, "**Author:** "+pr.Author)
+	}
+	if pr.Head != "" && pr.Base != "" {
+		meta = append(meta, fmt.Sprintf("**Branch:** `%s` → `%s`", pr.Head, pr.Base))
+	}
+	if pr.Action != "" {
+		meta = append(meta, "**Action:** "+pr.Action)
+	}
+	if pr.IsDraft {
+		meta = append(meta, "**Draft**")
+	}
+	if len(meta) > 0 {
+		b.WriteString("\n" + strings.Join(meta, " · "))
+	}
+
+	b.WriteString("\n\n---\n\n### Pull request description\n\n")
+	body := strings.TrimSpace(pr.Body)
+	if body == "" {
+		b.WriteString("_(no description provided)_")
+		return
+	}
+	if len(body) > maxIssuePRBodyBytes {
+		// Cut on a rune boundary so the excerpt cannot end mid-character.
+		cut := maxIssuePRBodyBytes
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		b.WriteString(body[:cut])
+		b.WriteString("\n\n_[description truncated — read the rest on the pull request]_")
+		return
+	}
+	b.WriteString(body)
 }
 
 func prettifyJSON(raw []byte) ([]byte, error) {
