@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +179,182 @@ func TestBuildIssueDescription_NonWebhookSourceWithPayloadIgnored(t *testing.T) 
 	got := s.buildIssueDescription(ap, run, "UTC")
 	if strings.Contains(got.String, "Webhook event") {
 		t.Fatalf("non-webhook source should not include webhook block: %q", got.String)
+	}
+}
+
+// ── GitHub pull-request rendering ───────────────────────────────────────
+//
+// A GitHub PR payload is ~30 KB of JSON, and dumping it verbatim made the
+// issue body unreadable for the humans watching the board while burying
+// the one thing the agent actually needs — the PR URL — inside a wall of
+// API links. For pull_request events we render a short header plus the
+// PR's own description instead. Every other event keeps the raw dump,
+// because it is the agent's only channel for event context and we have no
+// per-provider knowledge to summarise it with.
+
+// prPayload builds a webhook envelope shaped like a real GitHub
+// pull_request event. Field names mirror the payload captured from
+// production run 5c0b3850.
+func prPayload(t *testing.T, body string) []byte {
+	t.Helper()
+	return prPayloadWith(t, map[string]any{
+		"html_url": "https://github.com/acme/widgets/pull/6",
+		"title":    "fix: the thing",
+		"body":     body,
+		"user":     map[string]any{"login": "octocat"},
+		"head":     map[string]any{"ref": "feature/x"},
+		"base":     map[string]any{"ref": "main"},
+	})
+}
+
+func prPayloadWith(t *testing.T, pr map[string]any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"event": "github.pull_request.opened",
+		"eventPayload": map[string]any{
+			"action":       "opened",
+			"number":       6,
+			"pull_request": pr,
+			"repository":   map[string]any{"full_name": "acme/widgets"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func webhookRun(payload []byte) db.AutopilotRun {
+	return db.AutopilotRun{
+		Source:         "webhook",
+		TriggerPayload: payload,
+		TriggeredAt:    pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true},
+	}
+}
+
+func TestBuildIssueDescription_GitHubPullRequestIsHumanReadable(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "watch PRs", Valid: true}}
+	got := s.buildIssueDescription(ap, webhookRun(prPayload(t, "Fixes the widget.\n\n## Details\nlots of prose")), "UTC").String
+
+	// The autopilot's own description and the rename instruction stay put.
+	if !strings.HasPrefix(got, "watch PRs") {
+		t.Errorf("user description not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "*Autopilot run triggered at") {
+		t.Errorf("rename instruction missing:\n%s", got)
+	}
+
+	for _, want := range []string{
+		"https://github.com/acme/widgets/pull/6", // the one link the agent needs
+		"acme/widgets#6",
+		"fix: the thing",
+		"octocat",
+		"feature/x",
+		"main",
+		"Fixes the widget.", // the PR's own description, verbatim
+		"## Details",
+		"lots of prose",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("body missing %q:\n%s", want, got)
+		}
+	}
+
+	// The whole point: no raw payload dump.
+	if strings.Contains(got, "Webhook payload:") || strings.Contains(got, "```json") {
+		t.Errorf("PR events must not dump the raw payload:\n%s", got)
+	}
+	// None of the API-link noise from the payload may leak through.
+	if strings.Contains(got, "api.github.com") {
+		t.Errorf("API links leaked into the body:\n%s", got)
+	}
+}
+
+// The event name alone is NOT the discriminator. An envelope that says
+// pull_request but carries no usable pull_request object must fall back to
+// the raw dump rather than render a header full of blanks.
+func TestBuildIssueDescription_PullRequestEventWithoutPRObjectFallsBack(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "watch PRs", Valid: true}}
+	payload := []byte(`{"event":"github.pull_request.opened","eventPayload":{"number":7}}`)
+
+	got := s.buildIssueDescription(ap, webhookRun(payload), "UTC").String
+	if !strings.Contains(got, "Webhook payload:") {
+		t.Errorf("should fall back to the raw dump:\n%s", got)
+	}
+	if strings.Contains(got, "**Pull request:**") {
+		t.Errorf("must not render a PR header with no PR object:\n%s", got)
+	}
+}
+
+// A pull_request object with no html_url is equally unusable.
+func TestBuildIssueDescription_PullRequestWithoutURLFallsBack(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "watch PRs", Valid: true}}
+	payload := prPayloadWith(t, map[string]any{"title": "no url here"})
+
+	got := s.buildIssueDescription(ap, webhookRun(payload), "UTC").String
+	if !strings.Contains(got, "Webhook payload:") {
+		t.Errorf("should fall back to the raw dump:\n%s", got)
+	}
+}
+
+// Non-GitHub and non-PR webhooks are untouched — we have no provider
+// knowledge to summarise them with, and the raw payload is the agent's
+// only source of event context.
+func TestBuildIssueDescription_OtherWebhookEventsStillDumpPayload(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "watch things", Valid: true}}
+	for _, event := range []string{
+		"github.workflow_run.completed",
+		"github.issue_comment.created",
+		"gitlab.Merge Request Hook",
+		"webhook.received",
+	} {
+		t.Run(event, func(t *testing.T) {
+			raw, _ := json.Marshal(map[string]any{
+				"event":        event,
+				"eventPayload": map[string]any{"pull_request": map[string]any{"html_url": "https://example.test/pull/1"}},
+			})
+			got := s.buildIssueDescription(ap, webhookRun(raw), "UTC").String
+			if !strings.Contains(got, "Webhook payload:") {
+				t.Errorf("%s should still dump the raw payload:\n%s", event, got)
+			}
+		})
+	}
+}
+
+// A PR opened with no description must not leave a dangling empty section.
+func TestBuildIssueDescription_EmptyPullRequestBody(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "watch PRs", Valid: true}}
+	got := s.buildIssueDescription(ap, webhookRun(prPayload(t, "   ")), "UTC").String
+
+	if !strings.Contains(got, "https://github.com/acme/widgets/pull/6") {
+		t.Errorf("link must still be present:\n%s", got)
+	}
+	if !strings.Contains(got, "no description provided") {
+		t.Errorf("empty body should say so explicitly:\n%s", got)
+	}
+}
+
+// PR bodies are unbounded. Left uncapped, one runaway description would
+// bloat the issue row for everyone looking at the board.
+func TestBuildIssueDescription_LongPullRequestBodyIsTruncated(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "watch PRs", Valid: true}}
+	long := strings.Repeat("x", maxIssuePRBodyBytes+5000)
+	got := s.buildIssueDescription(ap, webhookRun(prPayload(t, long)), "UTC").String
+
+	if len(got) > maxIssuePRBodyBytes+4096 {
+		t.Errorf("body is %d bytes, want it capped near %d", len(got), maxIssuePRBodyBytes)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("a truncated body must say so:\n%s", got[len(got)-300:])
+	}
+	if !strings.Contains(got, "https://github.com/acme/widgets/pull/6") {
+		t.Errorf("link must survive truncation:\n%s", got[:400])
 	}
 }
 
