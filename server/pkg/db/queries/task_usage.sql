@@ -165,3 +165,36 @@ WHERE a.workspace_id = $1
   AND (sqlc.narg('project_id')::uuid IS NULL OR i.project_id = sqlc.narg('project_id'))
 GROUP BY atq.agent_id
 ORDER BY total_seconds DESC;
+
+-- name: ListTaskProgressByIssue :many
+-- Read-only per-step projection for the ticket-progress popover: one row per
+-- agent_task_queue entry on the issue, with its task_usage rows folded in.
+-- Tokens sum across models; num_turns takes the MAX because each model row
+-- carries the same run-level turn count, not a share of it.
+SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
+       atq.created_at, atq.started_at, atq.completed_at,
+       COALESCE(SUM(tu.input_tokens), 0)::bigint       AS input_tokens,
+       COALESCE(SUM(tu.output_tokens), 0)::bigint      AS output_tokens,
+       COALESCE(SUM(tu.cache_read_tokens), 0)::bigint  AS cache_read_tokens,
+       COALESCE(SUM(tu.cache_write_tokens), 0)::bigint AS cache_write_tokens,
+       COALESCE(MAX(tu.num_turns), 0)::bigint          AS num_turns
+FROM agent_task_queue atq
+JOIN agent a ON a.id = atq.agent_id
+LEFT JOIN task_usage tu ON tu.task_id = atq.id
+WHERE atq.issue_id = $1
+GROUP BY atq.id, a.name, atq.status, atq.created_at, atq.started_at, atq.completed_at
+ORDER BY COALESCE(atq.started_at, atq.created_at) ASC;
+
+-- name: GetAutopilotAssigneeForIssue :one
+-- The entry point of the nominal chain: the autopilot that produced the
+-- issue's first task. Used only to seed the expected-steps walk.
+SELECT ap.assignee_type, ap.assignee_id
+FROM agent_task_queue atq
+JOIN autopilot_run ar ON ar.id = atq.autopilot_run_id
+JOIN autopilot ap ON ap.id = ar.autopilot_id
+WHERE atq.issue_id = $1
+ORDER BY atq.created_at ASC
+LIMIT 1;
+
+-- name: GetAgentByNameInWorkspace :one
+SELECT * FROM agent WHERE workspace_id = $1 AND name = $2;

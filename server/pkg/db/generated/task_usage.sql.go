@@ -11,6 +11,73 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getAgentByNameInWorkspace = `-- name: GetAgentByNameInWorkspace :one
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key FROM agent WHERE workspace_id = $1 AND name = $2
+`
+
+type GetAgentByNameInWorkspaceParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Name        string      `json:"name"`
+}
+
+func (q *Queries) GetAgentByNameInWorkspace(ctx context.Context, arg GetAgentByNameInWorkspaceParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, getAgentByNameInWorkspace, arg.WorkspaceID, arg.Name)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.RuntimeMode,
+		&i.RuntimeConfig,
+		&i.Visibility,
+		&i.Status,
+		&i.MaxConcurrentTasks,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.RuntimeID,
+		&i.Instructions,
+		&i.ArchivedAt,
+		&i.ArchivedBy,
+		&i.CustomEnv,
+		&i.CustomArgs,
+		&i.McpConfig,
+		&i.Model,
+		&i.ThinkingLevel,
+		&i.ComposioToolkitAllowlist,
+		&i.PermissionMode,
+		&i.Kind,
+		&i.SystemKey,
+	)
+	return i, err
+}
+
+const getAutopilotAssigneeForIssue = `-- name: GetAutopilotAssigneeForIssue :one
+SELECT ap.assignee_type, ap.assignee_id
+FROM agent_task_queue atq
+JOIN autopilot_run ar ON ar.id = atq.autopilot_run_id
+JOIN autopilot ap ON ap.id = ar.autopilot_id
+WHERE atq.issue_id = $1
+ORDER BY atq.created_at ASC
+LIMIT 1
+`
+
+type GetAutopilotAssigneeForIssueRow struct {
+	AssigneeType string      `json:"assignee_type"`
+	AssigneeID   pgtype.UUID `json:"assignee_id"`
+}
+
+// The entry point of the nominal chain: the autopilot that produced the
+// issue's first task. Used only to seed the expected-steps walk.
+func (q *Queries) GetAutopilotAssigneeForIssue(ctx context.Context, issueID pgtype.UUID) (GetAutopilotAssigneeForIssueRow, error) {
+	row := q.db.QueryRow(ctx, getAutopilotAssigneeForIssue, issueID)
+	var i GetAutopilotAssigneeForIssueRow
+	err := row.Scan(&i.AssigneeType, &i.AssigneeID)
+	return i, err
+}
+
 const getIssueUsageSummary = `-- name: GetIssueUsageSummary :one
 SELECT
     COALESCE(SUM(tu.input_tokens), 0)::bigint AS total_input_tokens,
@@ -386,6 +453,72 @@ func (q *Queries) ListDashboardUsageDaily(ctx context.Context, arg ListDashboard
 			&i.CacheReadTokens,
 			&i.CacheWriteTokens,
 			&i.TaskCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTaskProgressByIssue = `-- name: ListTaskProgressByIssue :many
+SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
+       atq.created_at, atq.started_at, atq.completed_at,
+       COALESCE(SUM(tu.input_tokens), 0)::bigint       AS input_tokens,
+       COALESCE(SUM(tu.output_tokens), 0)::bigint      AS output_tokens,
+       COALESCE(SUM(tu.cache_read_tokens), 0)::bigint  AS cache_read_tokens,
+       COALESCE(SUM(tu.cache_write_tokens), 0)::bigint AS cache_write_tokens,
+       COALESCE(MAX(tu.num_turns), 0)::bigint          AS num_turns
+FROM agent_task_queue atq
+JOIN agent a ON a.id = atq.agent_id
+LEFT JOIN task_usage tu ON tu.task_id = atq.id
+WHERE atq.issue_id = $1
+GROUP BY atq.id, a.name, atq.status, atq.created_at, atq.started_at, atq.completed_at
+ORDER BY COALESCE(atq.started_at, atq.created_at) ASC
+`
+
+type ListTaskProgressByIssueRow struct {
+	TaskID           pgtype.UUID        `json:"task_id"`
+	AgentName        string             `json:"agent_name"`
+	Status           string             `json:"status"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	CompletedAt      pgtype.Timestamptz `json:"completed_at"`
+	InputTokens      int64              `json:"input_tokens"`
+	OutputTokens     int64              `json:"output_tokens"`
+	CacheReadTokens  int64              `json:"cache_read_tokens"`
+	CacheWriteTokens int64              `json:"cache_write_tokens"`
+	NumTurns         int64              `json:"num_turns"`
+}
+
+// Read-only per-step projection for the ticket-progress popover: one row per
+// agent_task_queue entry on the issue, with its task_usage rows folded in.
+// Tokens sum across models; num_turns takes the MAX because each model row
+// carries the same run-level turn count, not a share of it.
+func (q *Queries) ListTaskProgressByIssue(ctx context.Context, issueID pgtype.UUID) ([]ListTaskProgressByIssueRow, error) {
+	rows, err := q.db.Query(ctx, listTaskProgressByIssue, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTaskProgressByIssueRow{}
+	for rows.Next() {
+		var i ListTaskProgressByIssueRow
+		if err := rows.Scan(
+			&i.TaskID,
+			&i.AgentName,
+			&i.Status,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.CacheReadTokens,
+			&i.CacheWriteTokens,
+			&i.NumTurns,
 		); err != nil {
 			return nil, err
 		}
