@@ -92,6 +92,25 @@ type TaskProgressPayload struct {
 	Total   int    `json:"total,omitempty"`
 }
 
+// TaskUsageTokens is the display vocabulary for stored token counters.
+// CacheCreation is the DB's cache_write_tokens under the name the UI uses.
+type TaskUsageTokens struct {
+	Input         int64 `json:"input"`
+	Output        int64 `json:"output"`
+	CacheCreation int64 `json:"cache_creation"`
+	CacheRead     int64 `json:"cache_read"`
+}
+
+// TaskUsageEventPayload rides the task:usage event, published once per usage
+// ingest with every entry in the request summed. It lets the board badge and
+// the progress popover stay live without polling.
+type TaskUsageEventPayload struct {
+	TaskID  string          `json:"task_id"`
+	IssueID string          `json:"issue_id"`
+	Tokens  TaskUsageTokens `json:"tokens"`
+	Turns   int64           `json:"turns"`
+}
+
 // TaskCompletedPayload is sent from daemon to server when a task finishes.
 type TaskCompletedPayload struct {
 	TaskID string `json:"task_id"`

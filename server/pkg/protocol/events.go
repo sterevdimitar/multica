@@ -38,6 +38,7 @@ const (
 	EventTaskCompleted             = "task:completed" // running → completed
 	EventTaskFailed                = "task:failed"    // running → failed
 	EventTaskMessage               = "task:message"
+	EventTaskUsage                 = "task:usage" // token/turn counters updated (incremental or final)
 	EventTaskCancelled             = "task:cancelled" // * → cancelled
 
 	// Inbox events

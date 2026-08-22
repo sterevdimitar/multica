@@ -5,7 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // ----------------------------------------------------------------------
@@ -185,5 +189,113 @@ func TestReportTaskUsage_LegacyPayloadStillAccepted(t *testing.T) {
 	}
 	if r.InputTokens != 10 || r.OutputTokens != 20 || r.CacheReadTokens != 30 || r.CacheWriteTokens != 40 {
 		t.Errorf("legacy token counts wrong: %+v", r)
+	}
+}
+
+// ----------------------------------------------------------------------
+// Task 7 — task:usage broadcast
+// ----------------------------------------------------------------------
+
+// seedProgressIssue creates a bare issue in the test workspace.
+func seedProgressIssue(t *testing.T, title string) string {
+	t.Helper()
+	ctx := context.Background()
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, creator_type, creator_id, title, number)
+		VALUES ($1, 'member', $2, $3, $4) RETURNING id
+	`, testWorkspaceID, testUserID, title, nextWorkspaceIssueNumber(t)).Scan(&issueID); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM task_usage WHERE task_id IN (SELECT id FROM agent_task_queue WHERE issue_id = $1)`, issueID)
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+	return issueID
+}
+
+// createIssueBackedTask mirrors createTestTask but links the task to an
+// issue — the usage broadcast carries issue_id, so the issue-less fixture
+// cannot exercise it.
+func createIssueBackedTask(t *testing.T, issueID, status string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	var agentID, runtimeID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id, runtime_id FROM agent WHERE workspace_id = $1 LIMIT 1
+	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
+		t.Fatalf("setup: get agent: %v", err)
+	}
+
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+		VALUES ($1, $2, $3, $4, 0) RETURNING id
+	`, agentID, runtimeID, issueID, status).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create issue-backed task: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM task_usage WHERE task_id = $1`, taskID)
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+	})
+	return taskID
+}
+
+func TestReportTaskUsage_BroadcastsTaskUsage(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	issueID := seedProgressIssue(t, "progress broadcast issue")
+	taskID := createIssueBackedTask(t, issueID, "running")
+
+	var mu sync.Mutex
+	var got []events.Event
+	testHandler.Bus.Subscribe(protocol.EventTaskUsage, func(e events.Event) {
+		p, ok := e.Payload.(protocol.TaskUsageEventPayload)
+		if !ok || p.TaskID != taskID {
+			return // another test's task — this bus has no unsubscribe
+		}
+		mu.Lock()
+		got = append(got, e)
+		mu.Unlock()
+	})
+
+	// Two entries in one request must produce exactly ONE event with the
+	// entries summed.
+	body := `{"usage":[` +
+		`{"provider":"anthropic","model":"m1","input_tokens":10,"output_tokens":5,` +
+		`"cache_read_tokens":100,"cache_write_tokens":7,"num_turns":3},` +
+		`{"provider":"anthropic","model":"m2","input_tokens":2,"output_tokens":1,` +
+		`"cache_read_tokens":300,"cache_write_tokens":2,"num_turns":4}]}`
+	if w := postTaskUsage(t, taskID, body); w.Code != http.StatusOK {
+		t.Fatalf("usage POST: got %d: %s", w.Code, w.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 task:usage event, got %d", len(got))
+	}
+	e := got[0]
+	if e.Type != protocol.EventTaskUsage {
+		t.Errorf("Type = %q, want task:usage", e.Type)
+	}
+	if e.WorkspaceID == "" {
+		t.Errorf("WorkspaceID empty — the realtime bridge drops non-daemon events with no workspace")
+	}
+	p := e.Payload.(protocol.TaskUsageEventPayload)
+	if p.IssueID != issueID {
+		t.Errorf("IssueID = %q, want %q", p.IssueID, issueID)
+	}
+	if p.Tokens.Input != 12 || p.Tokens.Output != 6 {
+		t.Errorf("tokens not summed across entries: %+v", p.Tokens)
+	}
+	if p.Tokens.CacheRead != 400 || p.Tokens.CacheCreation != 9 {
+		t.Errorf("cache tokens wrong (cache_write → cache_creation): %+v", p.Tokens)
+	}
+	if p.Turns != 7 {
+		t.Errorf("Turns = %d, want 7 (summed)", p.Turns)
 	}
 }

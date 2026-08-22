@@ -3443,8 +3443,12 @@ func nullableFloat8(v *float64) pgtype.Float8 {
 func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
-	// Verify the caller owns this task's workspace.
-	task, ok := h.requireDaemonTaskAccess(w, r, taskID)
+	// Verify the caller owns this task's workspace. The workspace-aware
+	// variant is used because the task:usage broadcast below needs it: the
+	// realtime bridge silently DROPS any non-daemon event with an empty
+	// WorkspaceID, so publishing without one would be a no-op that looks
+	// like it works.
+	task, workspaceID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, taskID)
 	if !ok {
 		return
 	}
@@ -3463,6 +3467,8 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 	// resolve to a provider instead of landing as '' and pricing $0.
 	var runtimeProvider string
 	runtimeProviderLoaded := false
+	var broadcast protocol.TaskUsageEventPayload
+	broadcastAny := false
 	for _, u := range req.Usage {
 		provider := normalizeProvider(u.Provider)
 		if provider == "" {
@@ -3511,6 +3517,28 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 				"cache_write_tokens", u.CacheWriteTokens,
 				"cache_read_ratio", float64(u.CacheReadTokens)/float64(totalInput),
 			)
+			// Sum for the broadcast. Only entries that actually landed
+			// contribute — a failed upsert `continue`s above.
+			broadcast.Tokens.Input += u.InputTokens
+			broadcast.Tokens.Output += u.OutputTokens
+			broadcast.Tokens.CacheCreation += u.CacheWriteTokens
+			broadcast.Tokens.CacheRead += u.CacheReadTokens
+			broadcast.Turns += u.NumTurns
+			broadcastAny = true
+		}
+	}
+
+	// One event per request, not per entry — a multi-model run should move
+	// the badge once. Skipped entirely when the workspace could not be
+	// resolved: the bridge would drop it anyway, and publishing an event
+	// nobody can receive hides the real problem.
+	if broadcastAny {
+		if workspaceID == "" {
+			slog.Debug("skip task:usage broadcast: no workspace for task", "task_id", taskID)
+		} else {
+			broadcast.TaskID = taskID
+			broadcast.IssueID = uuidToString(task.IssueID)
+			h.publishTask(protocol.EventTaskUsage, workspaceID, "system", "", taskID, broadcast)
 		}
 	}
 
