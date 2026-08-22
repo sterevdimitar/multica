@@ -523,5 +523,14 @@
     "row_backlog_hint": "에이전트를 대기 상태로 유지",
     "row_todo_label": "할 일",
     "row_todo_hint": "에이전트 시작"
+  },
+  "progress": {
+    "step_of": "{{m}}단계 중 {{n}}단계",
+    "completed_footer": "완료",
+    "step": "단계",
+    "elapsed": "경과",
+    "tokens": "토큰",
+    "turns": "턴",
+    "queued": "대기 중"
   }
 }

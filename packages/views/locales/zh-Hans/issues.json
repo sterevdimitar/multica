@@ -523,5 +523,14 @@
     "row_backlog_hint": "智能体保持暂停",
     "row_todo_label": "Todo",
     "row_todo_hint": "启动智能体"
+  },
+  "progress": {
+    "step_of": "第 {{n}} 步，共 {{m}} 步",
+    "completed_footer": "已完成",
+    "step": "步骤",
+    "elapsed": "耗时",
+    "tokens": "令牌",
+    "turns": "轮次",
+    "queued": "排队中"
   }
 }

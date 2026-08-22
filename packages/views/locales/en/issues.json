@@ -548,5 +548,14 @@
     "row_backlog_hint": "keeps the agent paused",
     "row_todo_label": "Todo",
     "row_todo_hint": "starts the agent"
+  },
+  "progress": {
+    "step_of": "Step {{n}} of {{m}}",
+    "completed_footer": "Completed",
+    "step": "Step",
+    "elapsed": "Elapsed",
+    "tokens": "Tokens",
+    "turns": "Turns",
+    "queued": "Queued"
   }
 }

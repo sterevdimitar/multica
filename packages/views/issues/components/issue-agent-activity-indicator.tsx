@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   HoverCard,
@@ -8,16 +8,27 @@ import {
   HoverCardContent,
 } from "@multica/ui/components/ui/hover-card";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useActorName } from "@multica/core/workspace/hooks";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
+import { issueKeys } from "@multica/core/issues/queries";
 import type { AgentTask } from "@multica/core/types";
 import { cn } from "@multica/ui/lib/utils";
 import type { AvatarSize } from "@multica/ui/lib/avatar-size";
 import { AgentAvatarStack } from "../../agents/components/agent-avatar-stack";
-import { AgentActivityHoverContent } from "../../agents/components/agent-activity-hover-content";
 import { selectIssueTasks, type IssueTaskGroups } from "../surface/activity";
+import { displayTokens, formatTokens, shortStepName } from "../surface/progress";
+import { IssueProgressHoverContent, formatElapsed } from "./issue-progress-hover-content";
 import { useT } from "../../i18n";
 
 const EMPTY_GROUPS: IssueTaskGroups = { running: [], queued: [] };
+
+/** Written exclusively by the task:usage WS handler; this cache entry has no
+ *  queryFn and is never fetched. */
+interface LiveUsageEntry {
+  task_id: string;
+  tokens: { input: number; output: number; cache_creation: number; cache_read: number };
+  turns: number;
+}
 
 interface IssueAgentActivityIndicatorProps {
   issueId: string;
@@ -25,6 +36,21 @@ interface IssueAgentActivityIndicatorProps {
   // primary control. Default xs (16 px) reads as a dot at typical board
   // densities while still showing the agent's face on hover-zoom.
   size?: AvatarSize;
+}
+
+/**
+ * Tick once per second so the badge's elapsed timer advances. The interval
+ * exists only while a task is actually running on this issue — see the guard
+ * at the call site — so an idle board pays nothing.
+ */
+function useBadgeNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  return now;
 }
 
 /**
@@ -36,16 +62,19 @@ interface IssueAgentActivityIndicatorProps {
  *   - 0 running, ≥1 queued → half-opacity stack + muted "Queued"
  *   - nothing               → return null (no chrome, no placeholder)
  *
- * The shimmer reuses chat's `animate-chat-text-shimmer` utility (defined
- * in packages/ui/styles/base.css). Earlier iterations layered a brand
- * ring + opacity pulse around the avatars; both read as nervous on a
- * dense board. Moving the "alive" signal onto the label keeps the
- * avatars themselves still and lets the cue ride a piece of text the
- * user can already read.
+ * When a task IS running the badge additionally carries a progress line:
+ * `[step] ⏱ M:SS 🪙 NN.Nk`. The timer runs off the running task's started_at;
+ * the token count comes from the WS-fed live-usage cache and appears only
+ * once the first ~30s usage flush has landed, so a step under 30s shows the
+ * timer alone rather than a misleading zero.
  *
- * Hover opens AgentActivityHoverContent which lists every active task
- * with status dot + duration. No link rows — the card itself is the
- * navigation target for issue detail.
+ * The card face deliberately does NOT skew-correct: there is no server_now
+ * without a fetch, and fetching per card would defeat the point of a badge.
+ * The popover's numbers are the corrected, authoritative ones.
+ *
+ * Hover opens IssueProgressHoverContent — the per-step table. The trigger is
+ * rendered whenever the issue has any tasks at all, not only running ones,
+ * so a parked or finished card still offers its history on hover.
  *
  * Subscribes to the one shared workspace snapshot query but narrows it to
  * this issue's tasks with a `select`. React Query's structural sharing keeps
@@ -62,6 +91,7 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
 }: IssueAgentActivityIndicatorProps) {
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
+  const { getActorName } = useActorName();
   const select = useCallback(
     (snapshot: AgentTask[]) => selectIssueTasks(snapshot, issueId),
     [issueId],
@@ -69,6 +99,15 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
   const { data: groups = EMPTY_GROUPS } = useQuery({
     ...agentTaskSnapshotOptions(wsId),
     select,
+  });
+
+  // Read-only subscription to the WS-written cache: no queryFn, never
+  // fetched, never refetched.
+  const { data: liveUsage } = useQuery<LiveUsageEntry | undefined>({
+    queryKey: issueKeys.liveUsage(issueId),
+    queryFn: () => undefined,
+    enabled: false,
+    staleTime: Infinity,
   });
 
   const { agentIds, opacity } = useMemo(() => {
@@ -83,9 +122,28 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
     };
   }, [groups]);
 
+  const runningTask = groups.running[0];
+  const now = useBadgeNow(Boolean(runningTask));
+
   if (agentIds.length === 0) return null;
-  const hoverTasks = [...groups.running, ...groups.queued];
   const isRunning = opacity === "full";
+
+  // Tokens are shown only when the flushed usage belongs to the task that is
+  // running right now — a stale count from the previous step would read as
+  // this step's progress.
+  const liveTokens =
+    runningTask && liveUsage?.task_id === runningTask.id
+      ? formatTokens(displayTokens(liveUsage.tokens))
+      : null;
+
+  const startedAt = runningTask?.started_at;
+  const elapsed = startedAt
+    ? formatElapsed(now - Date.parse(startedAt))
+    : null;
+
+  const stepName = runningTask
+    ? shortStepName(getActorName("agent", runningTask.agent_id))
+    : null;
 
   return (
     <HoverCard>
@@ -112,9 +170,20 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
             ? t(($) => $.agent_activity.status_running)
             : t(($) => $.agent_activity.status_queued)}
         </span>
+        {isRunning && stepName && (
+          <span className="text-[10px] leading-none tabular-nums text-muted-foreground">
+            {[
+              stepName,
+              elapsed ? `⏱ ${elapsed}` : t(($) => $.progress.queued),
+              liveTokens ? `🪙 ${liveTokens}` : null,
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          </span>
+        )}
       </HoverCardTrigger>
-      <HoverCardContent align="end" className="w-72">
-        <AgentActivityHoverContent tasks={hoverTasks} />
+      <HoverCardContent align="end" className="w-80">
+        <IssueProgressHoverContent issueId={issueId} />
       </HoverCardContent>
     </HoverCard>
   );

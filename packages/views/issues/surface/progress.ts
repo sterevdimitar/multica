@@ -48,6 +48,8 @@ export function displayTokens(t: {
   input: number;
   output: number;
   cache_creation: number;
+  /** Accepted and deliberately IGNORED — see the note above. */
+  cache_read?: number;
 }): number {
   return t.input + t.output + t.cache_creation;
 }

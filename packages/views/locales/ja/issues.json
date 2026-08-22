@@ -523,5 +523,14 @@
     "row_backlog_hint": "エージェントを一時停止のままにします",
     "row_todo_label": "未着手",
     "row_todo_hint": "エージェントを開始します"
+  },
+  "progress": {
+    "step_of": "ステップ {{n}} / {{m}}",
+    "completed_footer": "完了",
+    "step": "ステップ",
+    "elapsed": "経過",
+    "tokens": "トークン",
+    "turns": "ターン",
+    "queued": "待機中"
   }
 }
