@@ -88,13 +88,59 @@ The full callback endpoint set:
 
 - `POST {callback.url}/tasks/{task_id}/start` — when the agent process actually starts work (distinct from "we received the dispatch")
 - `POST {callback.url}/tasks/{task_id}/messages` — streaming events, mapped from claude stream-json
-- `POST {callback.url}/tasks/{task_id}/usage` — token usage per provider/model
+- `POST {callback.url}/tasks/{task_id}/usage` — token usage per provider/model (see below)
 - `POST {callback.url}/tasks/{task_id}/complete` — terminal success
 - `POST {callback.url}/tasks/{task_id}/fail` — terminal failure
 
 All five endpoints accept the callback JWT in `Authorization: Bearer ...`. The token's `task_id` claim **must** match the URL `task_id` — mismatch is 403.
 
 > **Note on JWT validation:** the middleware change that accepts callback tokens on these endpoints is tracked separately (Task A12); until it lands these endpoints accept only daemon tokens / PATs.
+
+## /usage — the extended payload
+
+`ReportTaskUsage` accepts, per entry, the four token counters plus four additive fields the
+GitHub-Actions runner sends. Everything after `cache_write_tokens` is optional; the in-tree
+local daemon keeps posting the short shape and its rows land with `num_turns = 0` and NULL
+durations.
+
+```json
+{
+  "usage": [{
+    "provider": "anthropic",
+    "model": "claude-opus-4-6",
+    "input_tokens": 1234,
+    "output_tokens": 567,
+    "cache_read_tokens": 890123,
+    "cache_write_tokens": 4567,
+    "num_turns": 7,
+    "duration_ms": 463000,
+    "duration_api_ms": 401000,
+    "total_cost_usd": 1.23
+  }]
+}
+```
+
+The runner POSTs this **twice or more per run**: an incremental flush roughly every 30s while
+the agent works, then one authoritative record at exit.
+
+- `num_turns` is always sent — a live count of assistant events on incremental flushes, the
+  run-level total on the final one.
+- `duration_ms` / `duration_api_ms` / `total_cost_usd` are sent **only on the final POST** and
+  are JSON-omitted otherwise. The upsert COALESCEs them, so a late incremental flush can never
+  null out a stored final value. Token counts and `num_turns` overwrite instead: they are
+  monotone and the final POST is chronologically last.
+- No discriminator distinguishes incremental from final. None is needed — `UpsertTaskUsage` is
+  last-write-wins on `UNIQUE (task_id, provider, model)`, and the runner's `streampost` exits
+  at stdin EOF before `streampost-finalize` runs.
+- Storage: `task_usage`, columns added by migration `204_task_usage_turns_duration`.
+- **Every accepted ingest publishes a `task:usage` realtime event** (workspace fanout, one
+  event per request with the entries summed) carrying `task_id`, `issue_id`, the four token
+  counters under display names (`input` / `output` / `cache_creation` / `cache_read`), and
+  `turns`. The publish is **skipped** when the task's workspace cannot be resolved: the
+  realtime bridge drops any non-`daemon:` event with an empty `WorkspaceID`, so publishing one
+  would be a silent no-op rather than a visible failure.
+- A caller that fails this POST should log and continue. Usage is observability; it must not be
+  able to fail the run it is measuring.
 
 ## /claim guard
 
