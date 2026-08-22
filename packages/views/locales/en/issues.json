@@ -556,6 +556,8 @@
     "elapsed": "Elapsed",
     "tokens": "Tokens",
     "turns": "Turns",
-    "queued": "Queued"
+    "queued": "Queued",
+    "empty": "No agent runs yet",
+    "history_label": "Agent run history"
   }
 }

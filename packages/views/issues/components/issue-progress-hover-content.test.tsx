@@ -234,3 +234,64 @@ describe("IssueProgressHoverContent", () => {
     expect(screen.queryByText("1:30")).toBeNull();
   });
 });
+
+describe("IssueProgressHoverContent — no runs", () => {
+  it("renders an empty state instead of an empty table", () => {
+    mockState.progress = {
+      tasks: [],
+      expected_steps: null,
+      server_now: "2026-08-22T10:11:30Z",
+    };
+
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+
+    expect(screen.getByText("No agent runs yet")).toBeTruthy();
+    expect(document.querySelector("table")).toBeNull();
+  });
+
+  it("renders the localized empty state", () => {
+    mockState.progress = {
+      tasks: [],
+      expected_steps: null,
+      server_now: "2026-08-22T10:11:30Z",
+    };
+
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderWithI18n(
+      <QueryClientProvider client={qc}>
+        <IssueProgressHoverContent issueId="i1" />
+      </QueryClientProvider>,
+      { locale: "zh-Hans" },
+    );
+
+    expect(screen.getByText("尚无智能体运行记录")).toBeTruthy();
+  });
+
+  it("renders the table for an issue with only historical runs", () => {
+    mockState.progress = {
+      tasks: [
+        {
+          task_id: "t1",
+          agent_name: "review-agent",
+          status: "completed",
+          queued_at: "2026-08-22T10:00:00Z",
+          started_at: "2026-08-22T10:00:00Z",
+          completed_at: "2026-08-22T10:02:00Z",
+          tokens: tokens(100, 50, 25, 900),
+          turns: 4,
+          is_live: false,
+        },
+      ],
+      expected_steps: null,
+      server_now: "2026-08-22T10:11:30Z",
+    };
+
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+
+    // A card with no ACTIVE task still gets its history — that is the whole
+    // reason the trigger is unconditional.
+    expect(document.querySelector("table")).toBeTruthy();
+    expect(rowCells("review")).toEqual(["✓review", "2:00", "175", "4"]);
+    expect(screen.queryByText("No agent runs yet")).toBeNull();
+  });
+});

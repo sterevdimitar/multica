@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { History } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   HoverCard,
@@ -60,7 +61,7 @@ function useBadgeNow(active: boolean): number {
  *
  *   - has ≥1 running task  → tiny avatar stack + shimmering "Working"
  *   - 0 running, ≥1 queued → half-opacity stack + muted "Queued"
- *   - nothing               → return null (no chrome, no placeholder)
+ *   - nothing               → a faint history glyph, hover-only affordance
  *
  * When a task IS running the badge additionally carries a progress line:
  * `[step] ⏱ M:SS 🪙 NN.Nk`. The timer runs off the running task's started_at;
@@ -72,9 +73,15 @@ function useBadgeNow(active: boolean): number {
  * without a fetch, and fetching per card would defeat the point of a badge.
  * The popover's numbers are the corrected, authoritative ones.
  *
- * Hover opens IssueProgressHoverContent — the per-step table. The trigger is
- * rendered whenever the issue has any tasks at all, not only running ones,
- * so a parked or finished card still offers its history on hover.
+ * Hover opens IssueProgressHoverContent — the per-step table.
+ *
+ * The trigger renders on EVERY card, with no "does this issue have history"
+ * pre-check. Such a check is only answerable per-issue, and the board's
+ * snapshot cannot answer it (it carries active tasks plus each agent's single
+ * most recent outcome), so honouring it would mean one fetch per card at board
+ * render. Fetching on hover instead costs one request per actual hover and
+ * nothing at all for the cards nobody points at — and an issue with no runs
+ * gets a one-line empty state rather than an empty table.
  *
  * Subscribes to the one shared workspace snapshot query but narrows it to
  * this issue's tasks with a `select`. React Query's structural sharing keeps
@@ -125,8 +132,8 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
   const runningTask = groups.running[0];
   const now = useBadgeNow(Boolean(runningTask));
 
-  if (agentIds.length === 0) return null;
   const isRunning = opacity === "full";
+  const hasActive = agentIds.length > 0;
 
   // Tokens are shown only when the flushed usage belongs to the task that is
   // running right now — a stale count from the previous step would read as
@@ -152,25 +159,38 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
           <span className="inline-flex shrink-0 items-center gap-1" />
         }
       >
-        <AgentAvatarStack
-          agentIds={agentIds}
-          size={size}
-          opacity={opacity}
-          max={3}
-        />
-        <span
-          className={cn(
-            "text-[10px] leading-none",
-            isRunning
-              ? "animate-chat-text-shimmer"
-              : "text-muted-foreground",
-          )}
-        >
-          {isRunning
-            ? t(($) => $.agent_activity.status_running)
-            : t(($) => $.agent_activity.status_queued)}
-        </span>
-        {isRunning && stepName && (
+        {hasActive ? (
+          <>
+            <AgentAvatarStack
+              agentIds={agentIds}
+              size={size}
+              opacity={opacity}
+              max={3}
+            />
+            <span
+              className={cn(
+                "text-[10px] leading-none",
+                isRunning
+                  ? "animate-chat-text-shimmer"
+                  : "text-muted-foreground",
+              )}
+            >
+              {isRunning
+                ? t(($) => $.agent_activity.status_running)
+                : t(($) => $.agent_activity.status_queued)}
+            </span>
+          </>
+        ) : (
+          // Idle card: a deliberately faint 12px glyph. It has to be a real
+          // hover target on every card, but it must not compete with the
+          // identifier and title on a dense board — so it is quiet until
+          // pointed at.
+          <History
+            className="size-3 text-muted-foreground/40 transition-colors hover:text-muted-foreground"
+            aria-label={t(($) => $.progress.history_label)}
+          />
+        )}
+        {hasActive && isRunning && stepName && (
           <span className="text-[10px] leading-none tabular-nums text-muted-foreground">
             {[
               stepName,

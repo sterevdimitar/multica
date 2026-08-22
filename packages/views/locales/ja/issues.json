@@ -531,6 +531,8 @@
     "elapsed": "経過",
     "tokens": "トークン",
     "turns": "ターン",
-    "queued": "待機中"
+    "queued": "待機中",
+    "empty": "エージェントの実行はまだありません",
+    "history_label": "エージェント実行履歴"
   }
 }

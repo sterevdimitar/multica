@@ -61,7 +61,7 @@ export function formatElapsed(ms: number | null): string {
  */
 export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContentProps) {
   const { t } = useT("issues");
-  const { data } = useQuery(issueProgressOptions(issueId));
+  const { data, isPending } = useQuery(issueProgressOptions(issueId));
   const now = useProgressNow();
 
   const rows = useMemo(() => groupProgressRows(data?.tasks ?? []), [data?.tasks]);
@@ -92,7 +92,18 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
     return { n: Math.min(finished + 1, expectedSteps.length), m: expectedSteps.length };
   }, [expectedSteps, rows]);
 
-  if (rows.length === 0 && pendingSteps.length === 0) return null;
+  // The trigger is on every board card now, so "this issue has never had a
+  // run" is a normal, common state — it gets a sentence rather than an empty
+  // table. Nothing is rendered while the first fetch is still in flight: a
+  // flash of "no runs yet" that then becomes a table reads as a bug.
+  if (rows.length === 0 && pendingSteps.length === 0) {
+    if (isPending) return null;
+    return (
+      <p className="text-xs text-muted-foreground">
+        {t(($) => $.progress.empty)}
+      </p>
+    );
+  }
 
   const liveElapsed = (row: ProgressRow): number | null => {
     if (row.status !== "live" || !row.liveStartedAt) return row.elapsedMs;

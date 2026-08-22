@@ -531,6 +531,8 @@
     "elapsed": "耗时",
     "tokens": "令牌",
     "turns": "轮次",
-    "queued": "排队中"
+    "queued": "排队中",
+    "empty": "尚无智能体运行记录",
+    "history_label": "智能体运行历史"
   }
 }
