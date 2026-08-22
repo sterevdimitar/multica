@@ -919,6 +919,10 @@ type TaskUsage struct {
 	CacheWriteTokens int64              `json:"cache_write_tokens"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	NumTurns         int64              `json:"num_turns"`
+	DurationMs       pgtype.Int8        `json:"duration_ms"`
+	DurationApiMs    pgtype.Int8        `json:"duration_api_ms"`
+	TotalCostUsd     pgtype.Float8      `json:"total_cost_usd"`
 }
 
 type TaskUsageHourly struct {
