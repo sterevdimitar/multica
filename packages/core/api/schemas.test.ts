@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   AppConfigSchema,
+  IssueProgressSchema,
+  EMPTY_ISSUE_PROGRESS,
   AgentTaskListSchema,
   AutopilotRunSchema,
   FALLBACK_AUTOPILOT_RUN,
@@ -946,5 +948,60 @@ describe("CommentTriggerPreviewSchema.blocked", () => {
       ],
     });
     expect(parsed.blocked.map((b) => b.target_id)).toEqual(["s1", "a1"]);
+  });
+});
+
+describe("IssueProgressSchema", () => {
+  it("parses a full valid progress body", () => {
+    const parsed = IssueProgressSchema.parse({
+      tasks: [
+        {
+          task_id: "3d1c",
+          agent_name: "review-agent",
+          status: "completed",
+          queued_at: "2026-08-22T10:00:00Z",
+          started_at: "2026-08-22T10:00:05Z",
+          completed_at: "2026-08-22T10:04:17Z",
+          tokens: { input: 30100, output: 8100, cache_creation: 5200, cache_read: 912000 },
+          turns: 14,
+          is_live: false,
+        },
+      ],
+      expected_steps: ["review-agent", "fixer"],
+      server_now: "2026-08-22T10:11:32.123Z",
+    });
+    expect(parsed.tasks).toHaveLength(1);
+    expect(parsed.tasks[0]!.tokens.cache_creation).toBe(5200);
+    expect(parsed.tasks[0]!.turns).toBe(14);
+    expect(parsed.expected_steps).toEqual(["review-agent", "fixer"]);
+  });
+
+  it("defaults missing task fields rather than dropping the row", () => {
+    const parsed = IssueProgressSchema.parse({ tasks: [{ task_id: "t1" }] });
+    expect(parsed.tasks[0]!.agent_name).toBe("");
+    expect(parsed.tasks[0]!.turns).toBe(0);
+    expect(parsed.tasks[0]!.is_live).toBe(false);
+    expect(parsed.tasks[0]!.tokens).toEqual({
+      input: 0,
+      output: 0,
+      cache_creation: 0,
+      cache_read: 0,
+    });
+  });
+
+  it("accepts a null expected_steps (degraded derivation)", () => {
+    const parsed = IssueProgressSchema.parse({ tasks: [], expected_steps: null });
+    expect(parsed.expected_steps).toBeNull();
+  });
+
+  it("falls back without throwing on a malformed body", () => {
+    const out = parseWithFallback(
+      { tasks: "nope" },
+      IssueProgressSchema,
+      EMPTY_ISSUE_PROGRESS,
+      { endpoint: "issue-progress" },
+    );
+    expect(out).toBe(EMPTY_ISSUE_PROGRESS);
+    expect(out.tasks).toEqual([]);
   });
 });

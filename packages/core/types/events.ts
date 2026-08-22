@@ -30,6 +30,7 @@ export type WSEventType =
   | "task:completed"
   | "task:failed"
   | "task:message"
+  | "task:usage"
   | "task:cancelled"
   | "inbox:new"
   | "inbox:read"
@@ -244,6 +245,24 @@ export interface SubscriberRemovedPayload {
 export interface ActivityCreatedPayload {
   issue_id: string;
   entry: TimelineEntry;
+}
+
+/**
+ * task:usage — token/turn counters for one task, published on every usage
+ * ingest (a ~30s incremental flush during a run, then the authoritative
+ * final record). Workspace fanout, so it carries the issue id for routing
+ * into the per-issue progress cache.
+ */
+export interface TaskUsagePayload {
+  task_id: string;
+  issue_id: string;
+  tokens: {
+    input: number;
+    output: number;
+    cache_creation: number;
+    cache_read: number;
+  };
+  turns: number;
 }
 
 export interface TaskMessagePayload {
@@ -489,6 +508,7 @@ export interface WSEventPayloadMap {
   "task:completed": TaskCompletedPayload;
   "task:failed": TaskFailedPayload;
   "task:message": TaskMessagePayload;
+  "task:usage": TaskUsagePayload;
   "task:cancelled": TaskCancelledPayload;
   "task:progress": unknown;
   "inbox:new": InboxNewPayload;

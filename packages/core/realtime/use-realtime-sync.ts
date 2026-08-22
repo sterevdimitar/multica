@@ -10,6 +10,7 @@ import { clearWorkspaceStorage } from "../platform/storage-cleanup";
 import { defaultStorage } from "../platform/storage";
 import { getCurrentWsId, getCurrentSlug } from "../platform/workspace-storage";
 import { issueKeys } from "../issues/queries";
+import type { IssueProgress } from "../api/schemas";
 import { projectKeys } from "../projects/queries";
 import { pinKeys } from "../pins/queries";
 import { autopilotKeys } from "../autopilots/queries";
@@ -76,6 +77,7 @@ import type {
   SubscriberAddedPayload,
   SubscriberRemovedPayload,
   TaskMessagePayload,
+  TaskUsagePayload,
   TaskQueuedPayload,
   TaskDispatchPayload,
   TaskRunningPayload,
@@ -123,6 +125,26 @@ export function refetchPendingChatAggregate(
 ) {
   if (!wsId) return;
   qc.invalidateQueries({ queryKey: chatKeys.pendingTasks(wsId) });
+}
+
+/**
+ * Fold one task:usage event into a cached issue-progress response.
+ *
+ * Returns `undefined` for an uncached issue — the popover fetches on open,
+ * which heals it — and returns `old` UNCHANGED when the task is not in the
+ * cached list (a run that started after the last fetch). Never fabricates a
+ * row: a partial row would render as a step with no name or timestamps.
+ */
+export function applyTaskUsageToProgressCache(
+  old: IssueProgress | undefined,
+  p: TaskUsagePayload,
+): IssueProgress | undefined {
+  if (!old) return undefined;
+  const idx = old.tasks.findIndex((t) => t.task_id === p.task_id);
+  if (idx === -1) return old;
+  const tasks = old.tasks.slice();
+  tasks[idx] = { ...tasks[idx]!, tokens: p.tokens, turns: p.turns };
+  return { ...old, tasks };
 }
 
 export function applyChatDoneToCache(
@@ -769,6 +791,11 @@ export function useRealtimeSync(
       // every message would flood the network. Specific chat handlers below
       // still receive it via ws.on() (a separate subscription channel).
       "task:message",
+      // task:usage is out of the prefix path for the same reason: it fires
+      // roughly every 30s for the whole duration of a run, and the task:
+      // prefix handler invalidates six queries per tick. It is handled
+      // granularly by the ws.on("task:usage") writer below.
+      "task:usage",
       // task:completed / task:failed deliberately NOT here. They go through
       // both the task-prefix invalidate (refreshes the agent-task-snapshot
       // cache) AND the chat-specific ws.on() handlers below. The two
@@ -1073,6 +1100,21 @@ export function useRealtimeSync(
         task_id: payload.task_id,
         seq: payload.seq,
         type: payload.type,
+      });
+    });
+
+    // task:usage writes two caches and invalidates nothing: the per-issue
+    // progress projection (so an OPEN popover ticks) and the board badge's
+    // WS-only live-usage entry (which has no queryFn and is never fetched).
+    const unsubTaskUsage = ws.on("task:usage", (p) => {
+      const payload = p as TaskUsagePayload;
+      qc.setQueryData<IssueProgress>(issueKeys.progress(payload.issue_id), (old) =>
+        applyTaskUsageToProgressCache(old, payload),
+      );
+      qc.setQueryData(issueKeys.liveUsage(payload.issue_id), {
+        task_id: payload.task_id,
+        tokens: payload.tokens,
+        turns: payload.turns,
       });
     });
 
@@ -1383,6 +1425,7 @@ export function useRealtimeSync(
       unsubInvitationDeclined();
       unsubInvitationRevoked();
       unsubTaskMessage();
+      unsubTaskUsage();
       unsubChatMessage();
       unsubChatDone();
       unsubChatCancelFinalized();

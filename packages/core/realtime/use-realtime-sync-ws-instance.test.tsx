@@ -250,3 +250,83 @@ describe("useRealtimeSync — workspace:deleted self-initiated suppression", () 
     expect(defaultStorage.getItem("multica_issue_draft:delete-me")).toBeNull();
   });
 });
+
+// An emittable WS mock: records every ws.on / ws.onAny handler so a test can
+// push a real event through the hook's subscription wiring.
+function createEmittableWs() {
+  const handlers = new Map<string, ((p: unknown) => void)[]>();
+  const anyHandlers: ((m: { type: string; payload: unknown }) => void)[] = [];
+  const ws = {
+    on: (type: string, h: (p: unknown) => void) => {
+      const list = handlers.get(type) ?? [];
+      list.push(h);
+      handlers.set(type, list);
+      return () => {};
+    },
+    onAny: (h: (m: { type: string; payload: unknown }) => void) => {
+      anyHandlers.push(h);
+      return () => {};
+    },
+    onReconnect: () => () => {},
+  } as unknown as WSClient;
+
+  return {
+    ws,
+    emit(type: string, payload: unknown) {
+      for (const h of handlers.get(type) ?? []) h(payload);
+      for (const h of anyHandlers) h({ type, payload });
+    },
+  };
+}
+
+describe("useRealtimeSync — task:usage", () => {
+  let qc: QueryClient;
+  let stores: RealtimeSyncStores;
+
+  beforeEach(() => {
+    qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    stores = createStores();
+  });
+
+  const usagePayload = {
+    task_id: "t2",
+    issue_id: "i1",
+    tokens: { input: 12000, output: 3100, cache_creation: 900, cache_read: 400000 },
+    turns: 7,
+  };
+
+  it("writes the progress and live-usage caches", () => {
+    const { ws, emit } = createEmittableWs();
+    renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+
+    const setSpy = vi.spyOn(qc, "setQueryData");
+    emit("task:usage", usagePayload);
+
+    const keys = setSpy.mock.calls.map((c) => JSON.stringify(c[0]));
+    expect(keys).toContain(JSON.stringify(["issues", "progress", "i1"]));
+    expect(keys).toContain(JSON.stringify(["issues", "live-usage", "i1"]));
+    expect(qc.getQueryData(["issues", "live-usage", "i1"])).toEqual({
+      task_id: "t2",
+      tokens: usagePayload.tokens,
+      turns: 7,
+    });
+  });
+
+  it("does not feed the debounced task: prefix invalidator", () => {
+    vi.useFakeTimers();
+    try {
+      const { ws, emit } = createEmittableWs();
+      renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+
+      const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+      emit("task:usage", usagePayload);
+      // Let any debounce window elapse — a 30s flush cadence must not fire
+      // the six-query task: fan-out per tick.
+      vi.advanceTimersByTime(5_000);
+
+      expect(invalidateSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

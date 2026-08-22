@@ -118,6 +118,14 @@ export const issueKeys = {
   tasksAll: () => ["issues", "tasks"] as const,
   /** Per-issue task list (issue-detail Execution log section). */
   tasks: (issueId: string) => [...issueKeys.tasksAll(), issueId] as const,
+  progressAll: () => ["issues", "progress"] as const,
+  /** Per-issue step progress (elapsed / tokens / turns). Fetched when the
+   *  progress popover opens and kept fresh by the task:usage WS handler. */
+  progress: (issueId: string) => [...issueKeys.progressAll(), issueId] as const,
+  liveUsageAll: () => ["issues", "live-usage"] as const,
+  /** WS-only cache: written exclusively by the task:usage handler and read
+   *  by the board badge, which never fetches. No queryFn backs this key. */
+  liveUsage: (issueId: string) => [...issueKeys.liveUsageAll(), issueId] as const,
 };
 
 export type MyIssuesFilter = Pick<
@@ -628,6 +636,36 @@ export function issueUsageOptions(issueId: string) {
   return queryOptions({
     queryKey: issueKeys.usage(issueId),
     queryFn: () => api.getIssueUsage(issueId),
+  });
+}
+
+/**
+ * Per-issue task list. The cache key sits under the `["issues","tasks"]`
+ * prefix so the global useRealtimeSync `task:` path invalidates it by
+ * prefix-match — no local WS subscription needed.
+ *
+ * Extracted so the Execution log and the issue header chip observe one
+ * cache entry through one definition; they previously repeated these
+ * options inline and had to be kept in sync by hand.
+ */
+export function issueTasksOptions(issueId: string) {
+  return queryOptions({
+    queryKey: issueKeys.tasks(issueId),
+    queryFn: () => api.listTasksByIssue(issueId),
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/**
+ * Per-step progress. Fetched on popover open; the task:usage WS handler
+ * writes the same key so an open popover stays live without polling.
+ */
+export function issueProgressOptions(issueId: string) {
+  return queryOptions({
+    queryKey: issueKeys.progress(issueId),
+    queryFn: () => api.getIssueProgress(issueId),
+    staleTime: 30_000,
   });
 }
 

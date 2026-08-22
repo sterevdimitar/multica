@@ -160,6 +160,9 @@ import { getCurrentSlug } from "../platform/workspace-storage";
 import { parseWithFallback } from "./schema";
 import {
   AgentTaskListSchema,
+  EMPTY_ISSUE_PROGRESS,
+  IssueProgressSchema,
+  type IssueProgress,
   AgentTemplateSchema,
   AgentTemplateSummaryListSchema,
   AttachmentResponseSchema,
@@ -1576,6 +1579,16 @@ export class ApiClient {
 
   async getIssueUsage(issueId: string): Promise<IssueUsageSummary> {
     return this.fetch(`/api/issues/${issueId}/usage`);
+  }
+
+  // Validated rather than trusted: this feeds a hover popover, so a
+  // malformed body must degrade to an empty table, never throw inside the
+  // render path.
+  async getIssueProgress(issueId: string): Promise<IssueProgress> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/progress`);
+    return parseWithFallback<IssueProgress>(raw, IssueProgressSchema, EMPTY_ISSUE_PROGRESS, {
+      endpoint: "GET /api/issues/:id/progress",
+    });
   }
 
   async cancelTask(issueId: string, taskId: string): Promise<AgentTask> {

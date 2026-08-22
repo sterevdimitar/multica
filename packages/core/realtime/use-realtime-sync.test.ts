@@ -5,6 +5,9 @@ import type { ApiClient } from "../api/client";
 import { chatKeys } from "../chat/queries";
 import { inboxKeys } from "../inbox/queries";
 import { issueKeys } from "../issues/queries";
+import type { IssueProgress } from "../api/schemas";
+import type { TaskUsagePayload } from "../types/events";
+import { applyTaskUsageToProgressCache } from "./use-realtime-sync";
 import { notificationPreferenceKeys } from "../notification-preferences/queries";
 import { workspaceKeys } from "../workspace/queries";
 import type {
@@ -851,5 +854,66 @@ describe("handleInboxNew", () => {
     await handleInboxNew(qc, inboxItem());
 
     expect(webBanners).toHaveLength(0);
+  });
+});
+
+describe("applyTaskUsageToProgressCache", () => {
+  const progress = (): IssueProgress => ({
+    tasks: [
+      {
+        task_id: "t1",
+        agent_name: "review-agent",
+        status: "completed",
+        queued_at: "2026-08-22T10:00:00Z",
+        started_at: "2026-08-22T10:00:05Z",
+        completed_at: "2026-08-22T10:04:17Z",
+        tokens: { input: 1, output: 2, cache_creation: 3, cache_read: 4 },
+        turns: 1,
+        is_live: false,
+      },
+      {
+        task_id: "t2",
+        agent_name: "fixer",
+        status: "running",
+        queued_at: "2026-08-22T10:05:00Z",
+        started_at: "2026-08-22T10:05:05Z",
+        completed_at: null,
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 0,
+        is_live: true,
+      },
+    ],
+    expected_steps: null,
+    server_now: "2026-08-22T10:06:00Z",
+  });
+
+  const payload = (task_id: string): TaskUsagePayload => ({
+    task_id,
+    issue_id: "i1",
+    tokens: { input: 12000, output: 3100, cache_creation: 900, cache_read: 400000 },
+    turns: 7,
+  });
+
+  it("replaces the matching row's tokens and turns", () => {
+    const out = applyTaskUsageToProgressCache(progress(), payload("t2"));
+    expect(out?.tasks[1]?.tokens).toEqual({
+      input: 12000,
+      output: 3100,
+      cache_creation: 900,
+      cache_read: 400000,
+    });
+    expect(out?.tasks[1]?.turns).toBe(7);
+    // Untouched row keeps its values, and non-token fields survive.
+    expect(out?.tasks[0]?.tokens.input).toBe(1);
+    expect(out?.tasks[1]?.status).toBe("running");
+  });
+
+  it("returns the previous object unchanged for an unknown task_id", () => {
+    const old = progress();
+    expect(applyTaskUsageToProgressCache(old, payload("t-unknown"))).toBe(old);
+  });
+
+  it("returns undefined when there is no cached progress", () => {
+    expect(applyTaskUsageToProgressCache(undefined, payload("t2"))).toBeUndefined();
   });
 });

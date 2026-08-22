@@ -797,6 +797,54 @@ export const AgentTaskSchema = z.object({
 
 export const AgentTaskListSchema = z.array(AgentTaskSchema);
 
+// ---------------------------------------------------------------------------
+// Issue progress (`GET /api/issues/:id/progress`) — the per-step elapsed /
+// tokens / turns projection behind the board badge and the progress popover.
+// Every field defaults so a partially-upgraded server degrades one value
+// rather than erasing the whole table.
+// ---------------------------------------------------------------------------
+export const IssueProgressTokensSchema = z.object({
+  input: z.number().default(0),
+  output: z.number().default(0),
+  cache_creation: z.number().default(0),
+  cache_read: z.number().default(0),
+}).loose();
+
+export const IssueProgressTaskSchema = z.object({
+  task_id: z.string(),
+  agent_name: z.string().default(""),
+  status: z.string().default(""),
+  queued_at: z.string().default(""),
+  started_at: z.string().nullish(),
+  completed_at: z.string().nullish(),
+  tokens: IssueProgressTokensSchema.default({
+    input: 0,
+    output: 0,
+    cache_creation: 0,
+    cache_read: 0,
+  }),
+  turns: z.number().default(0),
+  is_live: z.boolean().default(false),
+}).loose();
+
+export const IssueProgressSchema = z.object({
+  tasks: z.array(IssueProgressTaskSchema).default([]),
+  // null is a real, meaningful value here: the server could not derive the
+  // nominal chain, and the UI must omit "step N of M" rather than guess.
+  expected_steps: z.array(z.string()).nullish(),
+  server_now: z.string().default(""),
+}).loose();
+
+export type IssueProgress = z.infer<typeof IssueProgressSchema>;
+export type IssueProgressTask = z.infer<typeof IssueProgressTaskSchema>;
+export type IssueProgressTokens = z.infer<typeof IssueProgressTokensSchema>;
+
+export const EMPTY_ISSUE_PROGRESS: IssueProgress = {
+  tasks: [],
+  expected_steps: null,
+  server_now: "",
+};
+
 // Task cancellation (`POST /api/tasks/:id/cancel`) is consumed directly by
 // chat recovery. Its optional message payload must be well-formed before the
 // UI deletes a message from cache or restores text into the input.
