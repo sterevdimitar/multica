@@ -13,6 +13,10 @@ import {
 } from "../surface/progress";
 import { useT } from "../../i18n";
 
+/** Decorative row markers. Not translatable copy — glyphs, like the ✓/▶
+ *  pair below. */
+const PENDING_MARK = "○";
+
 interface IssueProgressHoverContentProps {
   issueId: string;
 }
@@ -138,7 +142,7 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
           {pendingSteps.map((name) => (
             <tr key={`pending-${name}`} className="text-muted-foreground/60">
               <td className="truncate text-left">
-                <span className="mr-1">○</span>
+                <span className="mr-1" aria-hidden>{PENDING_MARK}</span>
                 {shortStepName(name)}
               </td>
               <td className="text-right">—</td>
