@@ -3404,13 +3404,40 @@ func formatLegacyCommentEntry(comment CoalescedCommentData) string {
 
 // ReportTaskUsage stores per-task token usage. Called independently of
 // complete/fail so usage is captured even when tasks fail or are blocked.
+//
+// NumTurns/DurationMS/DurationAPIMS/TotalCostUSD are additive fields sent by
+// the GitHub-Actions webhook runner. The durations and cost are pointers so
+// "not sent" (an incremental mid-run flush) stays distinguishable from a
+// genuine 0 — the upsert COALESCEs a nil onto whatever is already stored.
+// The in-tree local daemon keeps posting the old shape; its rows simply land
+// with num_turns 0 and NULL durations.
 type TaskUsagePayload struct {
-	Provider         string `json:"provider"`
-	Model            string `json:"model"`
-	InputTokens      int64  `json:"input_tokens"`
-	OutputTokens     int64  `json:"output_tokens"`
-	CacheReadTokens  int64  `json:"cache_read_tokens"`
-	CacheWriteTokens int64  `json:"cache_write_tokens"`
+	Provider         string   `json:"provider"`
+	Model            string   `json:"model"`
+	InputTokens      int64    `json:"input_tokens"`
+	OutputTokens     int64    `json:"output_tokens"`
+	CacheReadTokens  int64    `json:"cache_read_tokens"`
+	CacheWriteTokens int64    `json:"cache_write_tokens"`
+	NumTurns         int64    `json:"num_turns"`
+	DurationMS       *int64   `json:"duration_ms"`
+	DurationAPIMS    *int64   `json:"duration_api_ms"`
+	TotalCostUSD     *float64 `json:"total_cost_usd"`
+}
+
+// nullableInt8 maps an optional int64 to the pgtype the generated params use.
+func nullableInt8(v *int64) pgtype.Int8 {
+	if v == nil {
+		return pgtype.Int8{}
+	}
+	return pgtype.Int8{Int64: *v, Valid: true}
+}
+
+// nullableFloat8 is nullableInt8's float sibling.
+func nullableFloat8(v *float64) pgtype.Float8 {
+	if v == nil {
+		return pgtype.Float8{}
+	}
+	return pgtype.Float8{Float64: *v, Valid: true}
 }
 
 func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
@@ -3458,6 +3485,10 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 			OutputTokens:     u.OutputTokens,
 			CacheReadTokens:  u.CacheReadTokens,
 			CacheWriteTokens: u.CacheWriteTokens,
+			NumTurns:         u.NumTurns,
+			DurationMs:       nullableInt8(u.DurationMS),
+			DurationApiMs:    nullableInt8(u.DurationAPIMS),
+			TotalCostUsd:     nullableFloat8(u.TotalCostUSD),
 		}); err != nil {
 			slog.Warn("upsert task usage failed", "task_id", taskID, "model", u.Model, "error", err)
 			continue
