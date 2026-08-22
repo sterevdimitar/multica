@@ -1632,6 +1632,7 @@ func (s *TaskService) CancelTasksForIssue(ctx context.Context, issueID pgtype.UU
 	}
 	for _, t := range cancelled {
 		s.captureTaskCancelled(ctx, t)
+		s.MaybeDispatchCancelToWebhook(ctx, t)
 		s.ReconcileAgentStatus(ctx, t.AgentID)
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
 	}
@@ -1652,6 +1653,7 @@ func (s *TaskService) CancelTasksForAgent(ctx context.Context, agentID pgtype.UU
 	}
 	for _, t := range cancelled {
 		s.captureTaskCancelled(ctx, t)
+		s.MaybeDispatchCancelToWebhook(ctx, t)
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
 	}
 	// Reconcile once after the loop — agent transitions from
@@ -1759,6 +1761,11 @@ func (s *TaskService) CancelTaskWithResult(ctx context.Context, taskID pgtype.UU
 
 	slog.Info("task cancelled", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskCancelled(ctx, task)
+	// The DB row above is terminal and is the source of truth; this tells a
+	// webhook runtime to kill the run it is still executing. Best-effort by
+	// contract — a lost cancel costs one bounded run, and the human pressing
+	// Stop is waiting on this response.
+	s.MaybeDispatchCancelToWebhook(ctx, task)
 	cancelledChatMessage := s.finalizeCancelledChatMessage(ctx, task, opts)
 
 	// Reconcile agent status
