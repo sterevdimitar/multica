@@ -798,6 +798,13 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/tasks/{taskId}/messages", h.ReportTaskMessages)
 		r.Get("/tasks/{taskId}/messages", h.ListTaskMessages)
 		r.Post("/tasks/{taskId}/cancel-ack", h.AckTaskCancelled)
+		// Session-transcript archive. Same middleware chain and same
+		// requireDaemonTaskAccess gate as the callbacks above: the per-task
+		// callback JWT is the only credential either endpoint accepts, and
+		// the (agent, issue) pair a fetch reads is resolved from the task
+		// that JWT names.
+		r.Put("/tasks/{taskId}/transcript", h.UploadTaskTranscript)
+		r.Get("/tasks/{taskId}/resume-transcript", h.GetTaskResumeTranscript)
 
 		r.Post("/workspaces/{workspaceId}/issues/gc-check", h.BatchIssueGCCheck)
 		r.Get("/issues/{issueId}/gc-check", h.GetIssueGCCheck)
