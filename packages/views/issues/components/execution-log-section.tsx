@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Ban, CheckCircle2, ChevronRight, Loader2, RotateCcw, Square, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, dispatchReasonCode } from "@multica/core/api";
-import { issueProgressOptions, issueTasksOptions } from "@multica/core/issues/queries";
+import { issueTasksOptions } from "@multica/core/issues/queries";
 import type { AgentTask, TaskFailureReason } from "@multica/core/types";
 import { useTimeAgo } from "../../i18n";
 import {
@@ -15,7 +15,8 @@ import {
 } from "@multica/ui/components/ui/tooltip";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { formatDuration } from "../../agents/components/agent-activity-hover-content";
-import { displayTokens, formatTokens } from "../surface/progress";
+import { formatTokens } from "../surface/progress";
+import { useTaskMetricsMap, type TaskRowMetrics } from "../surface/use-task-metrics";
 import { TranscriptButton } from "../../common/task-transcript";
 import { failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { useT } from "../../i18n";
@@ -376,12 +377,6 @@ export function ActiveTaskRow({
   );
 }
 
-/** Per-run metrics folded out of the progress projection. */
-export interface TaskRowMetrics {
-  tokens: number;
-  turns: number;
-}
-
 /**
  * `elapsed · tokens · turns` for one run.
  *
@@ -414,22 +409,6 @@ function TaskMetrics({
       <span>{metrics ? String(metrics.turns) : "—"}</span>
     </span>
   );
-}
-
-/**
- * task_id → {tokens, turns} from the read-only progress projection. Kept
- * fresh by the task:usage WS handler writing the same cache key, so a
- * running row's numbers move without this section polling.
- */
-function useTaskMetricsMap(issueId: string): Map<string, TaskRowMetrics> {
-  const { data } = useQuery(issueProgressOptions(issueId));
-  return useMemo(() => {
-    const map = new Map<string, TaskRowMetrics>();
-    for (const t of data?.tasks ?? []) {
-      map.set(t.task_id, { tokens: displayTokens(t.tokens), turns: t.turns });
-    }
-    return map;
-  }, [data?.tasks]);
 }
 
 // ─── Past row ──────────────────────────────────────────────────────────────

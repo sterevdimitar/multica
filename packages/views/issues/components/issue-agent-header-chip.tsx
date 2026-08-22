@@ -9,11 +9,11 @@ import {
 } from "@multica/ui/components/ui/popover";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { cn } from "@multica/ui/lib/utils";
-import { displayTokens } from "../surface/progress";
-import { issueProgressOptions, issueTasksOptions } from "@multica/core/issues/queries";
+import { issueTasksOptions } from "@multica/core/issues/queries";
 import type { AgentTask } from "@multica/core/types";
 import { AgentAvatarStack } from "../../agents/components/agent-avatar-stack";
 import { ActiveTaskRow } from "./execution-log-section";
+import { useTaskMetricsMap } from "../surface/use-task-metrics";
 import { useT } from "../../i18n";
 
 // Per-issue "is an agent working on this right now?" chip for the issue
@@ -82,16 +82,9 @@ interface ActiveChipProps {
 }
 
 function ActiveChip({ issueId, running, queued }: ActiveChipProps) {
-  // Same cache entry the Execution log reads, so the chip's popover rows
-  // carry the same metrics without a second request.
-  const { data: progress } = useQuery(issueProgressOptions(issueId));
-  const metricsByTask = useMemo(() => {
-    const map = new Map<string, { tokens: number; turns: number }>();
-    for (const t of progress?.tasks ?? []) {
-      map.set(t.task_id, { tokens: displayTokens(t.tokens), turns: t.turns });
-    }
-    return map;
-  }, [progress?.tasks]);
+  // Same cache entry AND the same folding rule the Execution log uses, so
+  // the chip's popover rows can never disagree with the log's.
+  const metricsByTask = useTaskMetricsMap(issueId);
   const { t } = useT("issues");
   const { getActorName } = useActorName();
 

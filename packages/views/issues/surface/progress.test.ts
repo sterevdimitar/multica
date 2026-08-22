@@ -160,3 +160,16 @@ describe("shortStepName", () => {
     expect(shortStepName(input)).toBe(expected);
   });
 });
+
+describe("all-zero usage is 'no data', not zero", () => {
+  // The progress endpoint COALESCEs missing usage to 0, so a run that never
+  // flushed and a run that spent nothing arrive identical on the wire. The
+  // execution log folds an all-zero row out of its metrics map so the row
+  // renders em dashes; this pins the predicate that decision rests on.
+  it("distinguishes an all-zero row from one with any work", () => {
+    const zero = { input: 0, output: 0, cache_creation: 0, cache_read: 912_000 };
+    const some = { input: 0, output: 0, cache_creation: 1, cache_read: 0 };
+    expect(displayTokens(zero)).toBe(0);
+    expect(displayTokens(some)).toBe(1);
+  });
+});
