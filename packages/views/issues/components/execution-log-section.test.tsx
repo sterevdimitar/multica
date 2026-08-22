@@ -27,7 +27,7 @@ vi.mock("./terminate-task-confirm-dialog", () => ({
   TerminateTaskConfirmDialog: () => null,
 }));
 
-import { ActiveTaskRow, TaskCommentCoverage } from "./execution-log-section";
+import { ActiveTaskRow, PastRow, TaskCommentCoverage } from "./execution-log-section";
 
 function makeTask(overrides: Partial<AgentTask> = {}): AgentTask {
   return {
@@ -214,5 +214,54 @@ describe("TaskCommentCoverage", () => {
     );
 
     expect(screen.getByText("包含 3 条评论")).toBeInTheDocument();
+  });
+});
+
+describe("PastRow metrics", () => {
+  const finished = () =>
+    makeTask({
+      status: "completed",
+      started_at: "2026-06-08T08:00:00Z",
+      completed_at: "2026-06-08T08:04:12Z",
+    });
+
+  it("renders elapsed · tokens · turns when usage is known", () => {
+    renderWithI18n(
+      <PastRow
+        task={finished()}
+        issueId="issue-1"
+        metrics={{ tokens: 38_234, turns: 14 }}
+      />,
+    );
+
+    expect(screen.getByText("4m 12s")).toBeInTheDocument();
+    expect(screen.getByText("38.2k")).toBeInTheDocument();
+    expect(screen.getByText("14")).toBeInTheDocument();
+  });
+
+  it("renders em dashes for a run with no usage row", () => {
+    renderWithI18n(<PastRow task={finished()} issueId="issue-1" />);
+
+    expect(screen.getByText("4m 12s")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps metrics outside the hover-swapped status slot", () => {
+    renderWithI18n(
+      <PastRow
+        task={finished()}
+        issueId="issue-1"
+        metrics={{ tokens: 38_234, turns: 14 }}
+      />,
+    );
+
+    // RowStatus is hidden on hover so RowActions can take its place. Metrics
+    // must not live inside it, or they would vanish exactly when the user
+    // reaches for the row.
+    const tokens = screen.getByText("38.2k");
+    const hoverHidden = tokens.closest(
+      "[class*='group-hover/execution-log-row:hidden']",
+    );
+    expect(hoverHidden).toBeNull();
   });
 });

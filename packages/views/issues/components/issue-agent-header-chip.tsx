@@ -9,7 +9,8 @@ import {
 } from "@multica/ui/components/ui/popover";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { cn } from "@multica/ui/lib/utils";
-import { issueTasksOptions } from "@multica/core/issues/queries";
+import { displayTokens } from "../surface/progress";
+import { issueProgressOptions, issueTasksOptions } from "@multica/core/issues/queries";
 import type { AgentTask } from "@multica/core/types";
 import { AgentAvatarStack } from "../../agents/components/agent-avatar-stack";
 import { ActiveTaskRow } from "./execution-log-section";
@@ -81,6 +82,16 @@ interface ActiveChipProps {
 }
 
 function ActiveChip({ issueId, running, queued }: ActiveChipProps) {
+  // Same cache entry the Execution log reads, so the chip's popover rows
+  // carry the same metrics without a second request.
+  const { data: progress } = useQuery(issueProgressOptions(issueId));
+  const metricsByTask = useMemo(() => {
+    const map = new Map<string, { tokens: number; turns: number }>();
+    for (const t of progress?.tasks ?? []) {
+      map.set(t.task_id, { tokens: displayTokens(t.tokens), turns: t.turns });
+    }
+    return map;
+  }, [progress?.tasks]);
   const { t } = useT("issues");
   const { getActorName } = useActorName();
 
@@ -161,7 +172,12 @@ function ActiveChip({ issueId, running, queued }: ActiveChipProps) {
           </div>
           <div className="flex flex-col gap-0.5">
             {activeTasks.map((task) => (
-              <ActiveTaskRow key={task.id} task={task} issueId={issueId} />
+              <ActiveTaskRow
+                key={task.id}
+                task={task}
+                issueId={issueId}
+                metrics={metricsByTask.get(task.id)}
+              />
             ))}
           </div>
         </PopoverContent>

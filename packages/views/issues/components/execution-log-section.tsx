@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Ban, CheckCircle2, ChevronRight, Loader2, RotateCcw, Square, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, dispatchReasonCode } from "@multica/core/api";
-import { issueTasksOptions } from "@multica/core/issues/queries";
+import { issueProgressOptions, issueTasksOptions } from "@multica/core/issues/queries";
 import type { AgentTask, TaskFailureReason } from "@multica/core/types";
 import { useTimeAgo } from "../../i18n";
 import {
@@ -15,6 +15,7 @@ import {
 } from "@multica/ui/components/ui/tooltip";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { formatDuration } from "../../agents/components/agent-activity-hover-content";
+import { displayTokens, formatTokens } from "../surface/progress";
 import { TranscriptButton } from "../../common/task-transcript";
 import { failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { useT } from "../../i18n";
@@ -68,6 +69,7 @@ export function ExecutionLogSection({ issueId }: ExecutionLogSectionProps) {
   // needed, and the cache stays fresh even when this component isn't
   // mounted (e.g. user cancels from agent-side, then navigates here).
   const { data: tasks = [] } = useQuery(issueTasksOptions(issueId));
+  const metricsByTask = useTaskMetricsMap(issueId);
 
   const activeTasks = useMemo(
     () =>
@@ -130,7 +132,12 @@ export function ExecutionLogSection({ issueId }: ExecutionLogSectionProps) {
       {open && (
         <div className="space-y-0.5 pl-2">
           {activeTasks.map((task) => (
-            <ActiveTaskRow key={task.id} task={task} issueId={issueId} />
+            <ActiveTaskRow
+              key={task.id}
+              task={task}
+              issueId={issueId}
+              metrics={metricsByTask.get(task.id)}
+            />
           ))}
 
           {pastTasks.length > 0 && (
@@ -155,7 +162,12 @@ export function ExecutionLogSection({ issueId }: ExecutionLogSectionProps) {
               {showPast && (
                 <div className="mt-0.5 space-y-0.5">
                   {pastTasks.map((task) => (
-                    <PastRow key={task.id} task={task} issueId={issueId} />
+                    <PastRow
+                      key={task.id}
+                      task={task}
+                      issueId={issueId}
+                      metrics={metricsByTask.get(task.id)}
+                    />
                   ))}
                 </div>
               )}
@@ -249,9 +261,13 @@ function useStatusLabel(status: AgentTask["status"]): string {
 export function ActiveTaskRow({
   task,
   issueId,
+  metrics,
 }: {
   task: AgentTask;
   issueId: string;
+  /** Optional so the issue-header chip, which reuses this row, stays
+   *  source-compatible without wiring the progress query. */
+  metrics?: TaskRowMetrics;
 }) {
   const { t } = useT("issues");
   const [cancelling, setCancelling] = useState(false);
@@ -305,6 +321,11 @@ export function ActiveTaskRow({
         {task.status === "running" ? (
           <>
             <span className="text-info tabular-nums">{elapsed}</span>
+            {metrics && (
+              <span className="tabular-nums text-muted-foreground">
+                {` · ${formatTokens(metrics.tokens)} · ${metrics.turns}`}
+              </span>
+            )}
             <span className="sr-only">{label}</span>
           </>
         ) : (
@@ -355,9 +376,73 @@ export function ActiveTaskRow({
   );
 }
 
+/** Per-run metrics folded out of the progress projection. */
+export interface TaskRowMetrics {
+  tokens: number;
+  turns: number;
+}
+
+/**
+ * `elapsed · tokens · turns` for one run.
+ *
+ * Rendered as its own always-visible span BETWEEN the trigger text and
+ * RowStatus — never inside RowStatus, which the row swaps out for RowActions
+ * on hover. Metrics that vanish when you reach for the row are worse than no
+ * metrics.
+ *
+ * An em dash means "no data", not zero: a run whose usage never flushed and a
+ * run that genuinely spent nothing are different facts.
+ */
+function TaskMetrics({
+  task,
+  metrics,
+}: {
+  task: AgentTask;
+  metrics?: TaskRowMetrics;
+}) {
+  const elapsed =
+    task.started_at && task.completed_at
+      ? formatDuration(task.started_at, new Date(task.completed_at).getTime())
+      : null;
+
+  return (
+    <span className="flex shrink-0 items-center gap-1 tabular-nums text-muted-foreground">
+      <span>{elapsed ?? "—"}</span>
+      <span aria-hidden>·</span>
+      <span>{metrics ? formatTokens(metrics.tokens) : "—"}</span>
+      <span aria-hidden>·</span>
+      <span>{metrics ? String(metrics.turns) : "—"}</span>
+    </span>
+  );
+}
+
+/**
+ * task_id → {tokens, turns} from the read-only progress projection. Kept
+ * fresh by the task:usage WS handler writing the same cache key, so a
+ * running row's numbers move without this section polling.
+ */
+function useTaskMetricsMap(issueId: string): Map<string, TaskRowMetrics> {
+  const { data } = useQuery(issueProgressOptions(issueId));
+  return useMemo(() => {
+    const map = new Map<string, TaskRowMetrics>();
+    for (const t of data?.tasks ?? []) {
+      map.set(t.task_id, { tokens: displayTokens(t.tokens), turns: t.turns });
+    }
+    return map;
+  }, [data?.tasks]);
+}
+
 // ─── Past row ──────────────────────────────────────────────────────────────
 
-function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
+export function PastRow({
+  task,
+  issueId,
+  metrics,
+}: {
+  task: AgentTask;
+  issueId: string;
+  metrics?: TaskRowMetrics;
+}) {
   const { t } = useT("issues");
   const timeAgo = useTimeAgo();
   const [retrying, setRetrying] = useState(false);
@@ -404,6 +489,7 @@ function PastRow({ task, issueId }: { task: AgentTask; issueId: string }) {
     <RowShell task={task}>
       <TriggerText text={trigger} />
       <TaskCommentCoverage task={task} />
+      <TaskMetrics task={task} metrics={metrics} />
       <RowStatus title={failureLabel ?? label}>
         <TaskStatusIcon status={task.status} />
         <span className="sr-only">{failureLabel ?? label}</span>
