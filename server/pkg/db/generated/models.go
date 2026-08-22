@@ -85,6 +85,17 @@ type AgentRuntime struct {
 	WebhookEventType pgtype.Text        `json:"webhook_event_type"`
 }
 
+type AgentSessionTranscript struct {
+	ID           pgtype.UUID        `json:"id"`
+	TaskID       pgtype.UUID        `json:"task_id"`
+	IssueID      pgtype.UUID        `json:"issue_id"`
+	AgentID      pgtype.UUID        `json:"agent_id"`
+	SessionID    string             `json:"session_id"`
+	Content      []byte             `json:"content"`
+	ContentBytes int32              `json:"content_bytes"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
 type AgentSkill struct {
 	AgentID   pgtype.UUID        `json:"agent_id"`
 	SkillID   pgtype.UUID        `json:"skill_id"`
