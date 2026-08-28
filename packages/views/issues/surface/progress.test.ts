@@ -154,7 +154,7 @@ describe("shortStepName", () => {
     ["review-agent", "review"],
     ["review-validator-agent", "validator"],
     ["fixer", "fixer"],
-    ["readiness-agent", "judge"],
+    ["readiness-agent", "readiness"],
     ["custom-agent", "custom-agent"],
   ])("maps %s to %s", (input, expected) => {
     expect(shortStepName(input)).toBe(expected);

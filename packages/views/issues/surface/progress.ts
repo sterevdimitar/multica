@@ -173,7 +173,7 @@ const SHORT_STEP_NAMES: Record<string, string> = {
   "review-agent": "review",
   "review-validator-agent": "validator",
   fixer: "fixer",
-  "readiness-agent": "judge",
+  "readiness-agent": "readiness",
 };
 
 /** Unknown agents fall back to their raw name — never to a placeholder. */
