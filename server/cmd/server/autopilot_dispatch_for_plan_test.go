@@ -217,6 +217,157 @@ func TestDispatchAutopilotSuppressesRecentDuplicateIssue(t *testing.T) {
 	}
 }
 
+// TestDispatchDistinctPRsWithinWindowBothGetCards is the §1.2 regression
+// test: two deliveries for DIFFERENT pull requests, within the same
+// 60-second window the old title-and-window guard used, must produce TWO
+// cards, each reviewed. Before this fix, both cards were titled identically
+// ("PR Review on MR" — the autopilot's own title, since PR-triggered cards
+// had no PR-specific title), so the guard's title match collided the second
+// PR into the first and silently dropped its review (§1.2 of the design).
+// Dedupe now keys on metadata.pull_request, which differs per PR, so the
+// window never matters on this path at all.
+func TestDispatchDistinctPRsWithinWindowBothGetCards(t *testing.T) {
+	ctx := context.Background()
+	queries := db.New(testPool)
+	bus := events.New()
+	taskSvc := service.NewTaskService(queries, testPool, nil, bus)
+	autopilotSvc := service.NewAutopilotService(queries, testPool, bus, taskSvc)
+
+	var agentID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id::text FROM agent WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&agentID); err != nil {
+		t.Fatalf("load fixture agent: %v", err)
+	}
+
+	ap, err := queries.CreateAutopilot(ctx, db.CreateAutopilotParams{
+		WorkspaceID:        parseUUID(testWorkspaceID),
+		Title:              "PR Review on MR",
+		Description:        pgtype.Text{String: "Distinct PRs within window test", Valid: true},
+		AssigneeType:       "agent",
+		AssigneeID:         parseUUID(agentID),
+		Status:             "active",
+		ExecutionMode:      "create_issue",
+		IssueTitleTemplate: pgtype.Text{},
+		CreatedByType:      "member",
+		CreatedByID:        parseUUID(testUserID),
+	})
+	if err != nil {
+		t.Fatalf("CreateAutopilot: %v", err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = testPool.Exec(bg, `DELETE FROM issue WHERE origin_type = 'autopilot' AND origin_id = $1`, ap.ID)
+		_, _ = testPool.Exec(bg, `DELETE FROM autopilot WHERE id = $1`, ap.ID)
+	})
+
+	repo := "acme/distinct-window"
+	numberA := int(time.Now().UnixNano() % 100000)
+	numberB := numberA + 1
+
+	// Same title on purpose: with no issue_title_template set, both cards
+	// would render the autopilot's own title today, exactly the collision
+	// §1.2 describes.
+	first, err := autopilotSvc.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "webhook",
+		pullRequestWebhookPayload(repo, numberA, "same title"))
+	if err != nil {
+		t.Fatalf("first DispatchAutopilot (PR #%d): %v", numberA, err)
+	}
+	if first == nil || first.Status != "issue_created" || !first.IssueID.Valid {
+		t.Fatalf("first dispatch (PR #%d) = %+v, want issue_created with issue_id", numberA, first)
+	}
+
+	second, err := autopilotSvc.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "webhook",
+		pullRequestWebhookPayload(repo, numberB, "same title"))
+	if err != nil {
+		t.Fatalf("second DispatchAutopilot (PR #%d): %v", numberB, err)
+	}
+	if second == nil || second.Status != "issue_created" || !second.IssueID.Valid {
+		t.Fatalf("second dispatch (PR #%d) = %+v, want issue_created with issue_id, not skipped", numberB, second)
+	}
+	if second.IssueID == first.IssueID {
+		t.Fatalf("two distinct PRs must not share a card, got the same issue_id %s", first.IssueID)
+	}
+
+	if got := countAgentTasksForIssue(t, ctx, first.IssueID); got == 0 {
+		t.Fatalf("PR #%d's card must have a task enqueued, got %d", numberA, got)
+	}
+	if got := countAgentTasksForIssue(t, ctx, second.IssueID); got == 0 {
+		t.Fatalf("PR #%d's card must have a task enqueued, got %d", numberB, got)
+	}
+}
+
+// TestDispatchIdenticalTitleDistinctPRsGetSeparateCards is I6's other half:
+// two DIFFERENT pull requests whose pull_request.title strings happen to be
+// identical must still produce two cards. Task 4's
+// TestDispatchReusesAcrossPRTitleChange proves a title change never defeats
+// reuse for the SAME PR; this proves a shared title never collapses two
+// DIFFERENT PRs together. The first draft of this design (keying dedupe on
+// a title containing owner/repo#N) would have failed exactly this case.
+func TestDispatchIdenticalTitleDistinctPRsGetSeparateCards(t *testing.T) {
+	ctx := context.Background()
+	queries := db.New(testPool)
+	bus := events.New()
+	taskSvc := service.NewTaskService(queries, testPool, nil, bus)
+	autopilotSvc := service.NewAutopilotService(queries, testPool, bus, taskSvc)
+
+	var agentID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT id::text FROM agent WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		testWorkspaceID,
+	).Scan(&agentID); err != nil {
+		t.Fatalf("load fixture agent: %v", err)
+	}
+
+	ap, err := queries.CreateAutopilot(ctx, db.CreateAutopilotParams{
+		WorkspaceID:        parseUUID(testWorkspaceID),
+		Title:              "PR Review on MR",
+		Description:        pgtype.Text{String: "Identical title, distinct PRs test", Valid: true},
+		AssigneeType:       "agent",
+		AssigneeID:         parseUUID(agentID),
+		Status:             "active",
+		ExecutionMode:      "create_issue",
+		IssueTitleTemplate: pgtype.Text{},
+		CreatedByType:      "member",
+		CreatedByID:        parseUUID(testUserID),
+	})
+	if err != nil {
+		t.Fatalf("CreateAutopilot: %v", err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = testPool.Exec(bg, `DELETE FROM issue WHERE origin_type = 'autopilot' AND origin_id = $1`, ap.ID)
+		_, _ = testPool.Exec(bg, `DELETE FROM autopilot WHERE id = $1`, ap.ID)
+	})
+
+	repo := "acme/identical-title"
+	numberA := int(time.Now().UnixNano() % 100000)
+	numberB := numberA + 1
+	sharedTitle := "fix: typo"
+
+	first, err := autopilotSvc.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "webhook",
+		pullRequestWebhookPayload(repo, numberA, sharedTitle))
+	if err != nil {
+		t.Fatalf("first DispatchAutopilot (PR #%d): %v", numberA, err)
+	}
+	if first == nil || !first.IssueID.Valid {
+		t.Fatalf("first dispatch (PR #%d) = %+v, want a linked issue_id", numberA, first)
+	}
+
+	second, err := autopilotSvc.DispatchAutopilot(ctx, ap, pgtype.UUID{}, "webhook",
+		pullRequestWebhookPayload(repo, numberB, sharedTitle))
+	if err != nil {
+		t.Fatalf("second DispatchAutopilot (PR #%d): %v", numberB, err)
+	}
+	if second == nil || !second.IssueID.Valid {
+		t.Fatalf("second dispatch (PR #%d) = %+v, want a linked issue_id", numberB, second)
+	}
+	if second.IssueID == first.IssueID {
+		t.Fatalf("I6: an identical PR title must not collapse two distinct PRs into one card, got the same issue_id %s", first.IssueID)
+	}
+}
+
 // TestDispatchAutopilotForPlanRejectsZeroArgs locks in the
 // fail-loud contract: a caller that forgets to set trigger_id or
 // planned_at would silently disable the idempotency guard, and the
