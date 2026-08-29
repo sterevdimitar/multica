@@ -73,6 +73,7 @@ func TestQuickCreateCompletion_SubscribesRequester(t *testing.T) {
 		Number:      number,
 		OriginType:  pgtype.Text{String: "quick_create", Valid: true},
 		OriginID:    task.ID,
+		Metadata:    []byte("{}"),
 	})
 	if err != nil {
 		t.Fatalf("CreateIssueWithOrigin: %v", err)

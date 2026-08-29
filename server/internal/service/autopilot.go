@@ -617,6 +617,18 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		return fmt.Errorf("get next issue position: %w", err)
 	}
 
+	// The dedupe key (I3/I6). Absent — not empty — when there is no pull
+	// request: an empty key would match every other PR-less card and collapse
+	// them into one.
+	issueMetadata := []byte("{}")
+	if slug, ok := pullRequestSlug(*run); ok {
+		raw, err := json.Marshal(map[string]string{"pull_request": slug})
+		if err != nil {
+			return fmt.Errorf("marshal issue metadata: %w", err)
+		}
+		issueMetadata = raw
+	}
+
 	issue, err := qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
 		WorkspaceID:  ap.WorkspaceID,
 		Title:        title,
@@ -640,6 +652,7 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		ProjectID:     projectID,
 		OriginType:    pgtype.Text{String: "autopilot", Valid: true},
 		OriginID:      ap.ID,
+		Metadata:      issueMetadata,
 	})
 	if err != nil {
 		return fmt.Errorf("create issue: %w", err)

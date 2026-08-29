@@ -274,6 +274,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			OriginType:    p.OriginType,
 			OriginID:      p.OriginID,
 			Stage:         p.Stage,
+			Metadata:      []byte("{}"),
 		})
 	} else {
 		issue, err = qtx.CreateIssue(ctx, db.CreateIssueParams{

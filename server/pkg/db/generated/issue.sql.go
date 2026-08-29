@@ -257,10 +257,10 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
-    origin_type, origin_id, stage
+    origin_type, origin_id, stage, metadata
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    $16, $17, $18
+    $17, $18, $19, $16
 ) RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
@@ -280,6 +280,7 @@ type CreateIssueWithOriginParams struct {
 	DueDate       pgtype.Date `json:"due_date"`
 	Number        int32       `json:"number"`
 	ProjectID     pgtype.UUID `json:"project_id"`
+	Metadata      []byte      `json:"metadata"`
 	OriginType    pgtype.Text `json:"origin_type"`
 	OriginID      pgtype.UUID `json:"origin_id"`
 	Stage         pgtype.Int4 `json:"stage"`
@@ -302,6 +303,7 @@ func (q *Queries) CreateIssueWithOrigin(ctx context.Context, arg CreateIssueWith
 		arg.DueDate,
 		arg.Number,
 		arg.ProjectID,
+		arg.Metadata,
 		arg.OriginType,
 		arg.OriginID,
 		arg.Stage,
