@@ -1,0 +1,75 @@
+package service
+
+import (
+	"encoding/json"
+	"fmt"
+	"testing"
+
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
+)
+
+const testPRPayload = `{"action":"opened","number":26,
+  "pull_request":{"html_url":"https://github.com/sterevdimitar/dev-command-center/pull/26",
+    "title":"fix: don't write issue status when the PR is already merged",
+    "user":{"login":"u"},"head":{"ref":"h"},"base":{"ref":"main"}},
+  "repository":{"full_name":"sterevdimitar/dev-command-center"}}`
+
+// envelopeRun builds a webhook-sourced run carrying the {event, eventPayload}
+// envelope. Check db.AutopilotRun's field names in
+// server/pkg/db/generated/models.go before adjusting this.
+//
+// Named envelopeRun, not webhookRun (the plan's original name): autopilot_test.go
+// already declares a package-level webhookRun(payload []byte) db.AutopilotRun helper
+// with a different signature. Renamed here to avoid a redeclaration; every later task
+// in this plan that needs this helper uses envelopeRun too.
+//
+// Deviation from the plan's literal helper body: json.Marshal(map[string]any{...,
+// "eventPayload": json.RawMessage(eventPayload)}) compacts/validates the RawMessage
+// during marshal, so it cannot represent a deliberately MALFORMED inner payload (the
+// "malformed payload" test case below needs exactly that) — Marshal fails before
+// pullRequestSlug is ever reached. Built by string concatenation instead, so
+// eventPayload's bytes reach TriggerPayload completely unvalidated, malformed or not.
+func envelopeRun(t *testing.T, event, eventPayload string) db.AutopilotRun {
+	t.Helper()
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	raw := fmt.Sprintf(`{"event":%s}`, eventJSON)
+	if eventPayload != "" {
+		raw = fmt.Sprintf(`{"event":%s,"eventPayload":%s}`, eventJSON, eventPayload)
+	}
+	return db.AutopilotRun{Source: "webhook", TriggerPayload: []byte(raw)}
+}
+
+func TestPullRequestSlug(t *testing.T) {
+	slug, ok := pullRequestSlug(envelopeRun(t, "github.pull_request", testPRPayload))
+	if !ok {
+		t.Fatal("a pull_request payload must yield a slug")
+	}
+	if slug != "sterevdimitar/dev-command-center#26" {
+		t.Fatalf("slug = %q, want owner/repo#number with no space", slug)
+	}
+}
+
+// I3: every one of these must report absent, so no metadata key is written.
+func TestPullRequestSlugAbsentCases(t *testing.T) {
+	cases := []struct{ name, event, payload string }{
+		{"non-PR event", "github.push", `{"ref":"refs/heads/main"}`},
+		{"PR event, no pull_request object", "github.pull_request", `{"action":"opened"}`},
+		{"malformed payload", "github.pull_request", `{`},
+		{"empty payload", "github.pull_request", ``},
+		{"not a webhook run", "", ``},
+	}
+	for _, c := range cases {
+		if slug, ok := pullRequestSlug(envelopeRun(t, c.event, c.payload)); ok {
+			t.Errorf("%s: expected absent, got %q", c.name, slug)
+		}
+	}
+}
+
+func TestPullRequestSlugNeverEmptyWhenPresent(t *testing.T) {
+	if slug, ok := pullRequestSlug(db.AutopilotRun{}); ok && slug == "" {
+		t.Fatal("ok with an empty slug would collapse every PR-less card into one")
+	}
+}

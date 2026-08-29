@@ -1705,6 +1705,35 @@ type githubPullRequest struct {
 	IsDraft bool
 }
 
+// pullRequestSlug returns the stable identity of the pull request that caused
+// this run, as "owner/repo#123", and whether one was found.
+//
+// It unwraps the same {event, eventPayload} envelope buildIssueDescription
+// reads and reuses parseGitHubPullRequest, so the two cannot disagree about
+// what counts as a pull request payload.
+//
+// This value is the DEDUPE KEY (issue.metadata.pull_request), not a display
+// string. It deliberately has no space before the '#': the board subtitle
+// renders "owner/repo #123" separately, and neither is derived from the other
+// at read time.
+func pullRequestSlug(run db.AutopilotRun) (string, bool) {
+	if run.Source != "webhook" || len(run.TriggerPayload) == 0 {
+		return "", false
+	}
+	var env struct {
+		Event        string          `json:"event"`
+		EventPayload json.RawMessage `json:"eventPayload"`
+	}
+	if err := json.Unmarshal(run.TriggerPayload, &env); err != nil {
+		return "", false
+	}
+	pr, ok := parseGitHubPullRequest(env.Event, env.EventPayload)
+	if !ok || strings.TrimSpace(pr.Repo) == "" || pr.Number <= 0 {
+		return "", false
+	}
+	return fmt.Sprintf("%s#%d", pr.Repo, pr.Number), true
+}
+
 // parseGitHubPullRequest reports whether this envelope is a GitHub
 // pull_request event carrying a usable pull request, and extracts it.
 //
