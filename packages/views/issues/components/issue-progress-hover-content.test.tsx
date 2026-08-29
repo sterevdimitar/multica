@@ -104,6 +104,57 @@ describe("IssueProgressHoverContent", () => {
     expect(screen.queryByText("1:30")).toBeNull();
   });
 
+  // A finished run is not automatically a successful one. Before this, every
+  // non-live row drew "✓", so a review that died on max-turns was
+  // indistinguishable from one that completed cleanly.
+  it("marks failed and cancelled steps distinctly from a clean completion", () => {
+    mockState.progress = {
+      tasks: [
+        {
+          task_id: "t1",
+          agent_name: "review-agent",
+          status: "failed",
+          queued_at: "2026-08-22T10:00:00Z",
+          started_at: "2026-08-22T10:00:00Z",
+          completed_at: "2026-08-22T10:06:00Z",
+          tokens: tokens(100, 50, 25, 900),
+          turns: 21,
+          is_live: false,
+        },
+        {
+          task_id: "t2",
+          agent_name: "fixer",
+          status: "cancelled",
+          queued_at: "2026-08-22T10:07:00Z",
+          started_at: "2026-08-22T10:07:00Z",
+          completed_at: "2026-08-22T10:07:30Z",
+          tokens: tokens(10, 5, 0, 0),
+          turns: 1,
+          is_live: false,
+        },
+        {
+          task_id: "t3",
+          agent_name: "readiness-agent",
+          status: "completed",
+          queued_at: "2026-08-22T10:08:00Z",
+          started_at: "2026-08-22T10:08:00Z",
+          completed_at: "2026-08-22T10:09:00Z",
+          tokens: tokens(20, 10, 0, 0),
+          turns: 2,
+          is_live: false,
+        },
+      ],
+      expected_steps: null,
+      server_now: "2026-08-22T10:11:30Z",
+    };
+
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+
+    expect(rowCells("review")[0]).toBe("✗review");
+    expect(rowCells("fixer")[0]).toBe("⊘fixer");
+    expect(rowCells("readiness")[0]).toBe("✓readiness");
+  });
+
   it("renders history with no live row and a Completed footer when nothing runs", () => {
     mockState.progress = {
       tasks: [

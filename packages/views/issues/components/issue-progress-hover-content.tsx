@@ -13,9 +13,28 @@ import {
 } from "../surface/progress";
 import { useT } from "../../i18n";
 
-/** Decorative row markers. Not translatable copy — glyphs, like the ✓/▶
- *  pair below. */
+/** Decorative row markers. Not translatable copy — glyphs, like the
+ *  STATUS_MARK set below. */
 const PENDING_MARK = "○";
+
+/**
+ * Row marker per outcome.
+ *
+ * A FINISHED RUN IS NOT AUTOMATICALLY A SUCCESSFUL ONE. This used to be a
+ * `status === "live" ? "▶" : "✓"` ternary, so failed and cancelled runs drew
+ * the same tick as a clean completion — a review that died mid-run looked
+ * identical to one that produced findings, on the surface a person checks
+ * first. `ProgressRow.status` has carried all four states all along; only
+ * this renderer collapsed them.
+ *
+ * Glyphs, not translatable copy — same convention as PENDING_MARK.
+ */
+const STATUS_MARK: Record<ProgressRow["status"], string> = {
+  live: "▶",
+  completed: "✓",
+  failed: "✗",
+  cancelled: "⊘",
+};
 
 interface IssueProgressHoverContentProps {
   issueId: string;
@@ -133,11 +152,17 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
           {rows.map((row) => (
             <tr
               key={row.taskIds.join(",")}
-              className={cn(row.status === "live" && "font-medium text-foreground")}
+              className={cn(
+                row.status === "live" && "font-medium text-foreground",
+                row.status === "failed" && "text-destructive",
+              )}
             >
               <td className="truncate text-left">
-                <span className="mr-1 text-muted-foreground">
-                  {row.status === "live" ? "▶" : "✓"}
+                <span
+                  className={cn("mr-1", row.status !== "failed" && "text-muted-foreground")}
+                  aria-hidden
+                >
+                  {STATUS_MARK[row.status]}
                 </span>
                 {shortStepName(row.agentName)}
                 {row.count > 1 && (
