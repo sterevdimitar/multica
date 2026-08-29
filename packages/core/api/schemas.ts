@@ -824,6 +824,11 @@ export const IssueProgressTaskSchema = z.object({
     cache_read: 0,
   }),
   turns: z.number().default(0),
+  // The agent's --max-turns budget, or 0 for "no cap declared". The UI shows
+  // "21/20" when it is known so a run that died at its ceiling says so; 0
+  // means unknown and must render a bare count, never an invented
+  // denominator. Servers that predate the field send nothing and default to 0.
+  max_turns: z.number().default(0),
   is_live: z.boolean().default(false),
 }).loose();
 

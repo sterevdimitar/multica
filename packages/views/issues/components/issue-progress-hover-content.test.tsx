@@ -73,6 +73,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:04:00Z",
           tokens: tokens(30_000, 8_000, 234, 900_000),
           turns: 14,
+          max_turns: 0,
           is_live: false,
         },
         {
@@ -84,6 +85,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: null,
           tokens: tokens(1_000, 200, 34, 5_000),
           turns: 3,
+          max_turns: 0,
           is_live: true,
         },
       ],
@@ -119,6 +121,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:06:00Z",
           tokens: tokens(100, 50, 25, 900),
           turns: 21,
+          max_turns: 0,
           is_live: false,
         },
         {
@@ -130,6 +133,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:07:30Z",
           tokens: tokens(10, 5, 0, 0),
           turns: 1,
+          max_turns: 0,
           is_live: false,
         },
         {
@@ -141,6 +145,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:09:00Z",
           tokens: tokens(20, 10, 0, 0),
           turns: 2,
+          max_turns: 0,
           is_live: false,
         },
       ],
@@ -155,6 +160,47 @@ describe("IssueProgressHoverContent", () => {
     expect(rowCells("readiness")[0]).toBe("✓readiness");
   });
 
+  // The denominator is the whole point: 21 against 20 says "this run died at
+  // its ceiling" in a glance, where a lone 21 says nothing. A step with no
+  // declared cap must stay bare rather than borrow someone else's.
+  it("renders turns against the cap, and bare when no cap is declared", () => {
+    mockState.progress = {
+      tasks: [
+        {
+          task_id: "t1",
+          agent_name: "review-agent",
+          status: "failed",
+          queued_at: "2026-08-22T10:00:00Z",
+          started_at: "2026-08-22T10:00:00Z",
+          completed_at: "2026-08-22T10:06:00Z",
+          tokens: tokens(100, 50, 25, 900),
+          turns: 21,
+          max_turns: 20,
+          is_live: false,
+        },
+        {
+          task_id: "t2",
+          agent_name: "fixer",
+          status: "completed",
+          queued_at: "2026-08-22T10:07:00Z",
+          started_at: "2026-08-22T10:07:00Z",
+          completed_at: "2026-08-22T10:08:00Z",
+          tokens: tokens(10, 5, 0, 0),
+          turns: 7,
+          max_turns: 0,
+          is_live: false,
+        },
+      ],
+      expected_steps: null,
+      server_now: "2026-08-22T10:11:30Z",
+    };
+
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+
+    expect(rowCells("review")[3]).toBe("21/20");
+    expect(rowCells("fixer")[3]).toBe("7");
+  });
+
   it("renders history with no live row and a Completed footer when nothing runs", () => {
     mockState.progress = {
       tasks: [
@@ -167,6 +213,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:02:00Z",
           tokens: tokens(100, 50, 25, 900),
           turns: 4,
+          max_turns: 0,
           is_live: false,
         },
       ],
@@ -194,6 +241,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:02:00Z",
           tokens: tokens(1, 1, 1, 1),
           turns: 1,
+          max_turns: 0,
           is_live: false,
         },
       ],
@@ -219,6 +267,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:02:00Z",
           tokens: tokens(1, 1, 1, 1),
           turns: 1,
+          max_turns: 0,
           is_live: false,
         },
       ],
@@ -244,6 +293,7 @@ describe("IssueProgressHoverContent", () => {
         completed_at: `2026-08-22T10:0${i + 1}:00Z`,
         tokens: tokens(100, 50, 25, 900),
         turns: 2,
+        max_turns: 0,
         is_live: false,
       })),
       expected_steps: null,
@@ -270,6 +320,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: null,
           tokens: tokens(0, 0, 0, 0),
           turns: 0,
+          max_turns: 0,
           is_live: true,
         },
       ],
@@ -330,6 +381,7 @@ describe("IssueProgressHoverContent — no runs", () => {
           completed_at: "2026-08-22T10:02:00Z",
           tokens: tokens(100, 50, 25, 900),
           turns: 4,
+          max_turns: 0,
           is_live: false,
         },
       ],

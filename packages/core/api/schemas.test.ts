@@ -964,6 +964,7 @@ describe("IssueProgressSchema", () => {
           completed_at: "2026-08-22T10:04:17Z",
           tokens: { input: 30100, output: 8100, cache_creation: 5200, cache_read: 912000 },
           turns: 14,
+          max_turns: 0,
           is_live: false,
         },
       ],

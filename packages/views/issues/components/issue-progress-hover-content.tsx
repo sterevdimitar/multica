@@ -7,6 +7,7 @@ import { cn } from "@multica/ui/lib/utils";
 import {
   completedTotals,
   formatTokens,
+  formatTurns,
   groupProgressRows,
   shortStepName,
   type ProgressRow,
@@ -171,7 +172,7 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
               </td>
               <td className="text-right">{formatElapsed(liveElapsed(row))}</td>
               <td className="text-right">{formatTokens(row.tokens)}</td>
-              <td className="text-right">{row.turns}</td>
+              <td className="text-right">{formatTurns(row.turns, row.maxTurns)}</td>
             </tr>
           ))}
 

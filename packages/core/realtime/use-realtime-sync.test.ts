@@ -869,6 +869,7 @@ describe("applyTaskUsageToProgressCache", () => {
         completed_at: "2026-08-22T10:04:17Z",
         tokens: { input: 1, output: 2, cache_creation: 3, cache_read: 4 },
         turns: 1,
+        max_turns: 0,
         is_live: false,
       },
       {
@@ -880,6 +881,7 @@ describe("applyTaskUsageToProgressCache", () => {
         completed_at: null,
         tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
         turns: 0,
+        max_turns: 0,
         is_live: true,
       },
     ],

@@ -4,6 +4,7 @@ import {
   completedTotals,
   displayTokens,
   formatTokens,
+  formatTurns,
   groupProgressRows,
   shortStepName,
 } from "./progress";
@@ -18,6 +19,7 @@ function task(overrides: Partial<IssueProgressTask> = {}): IssueProgressTask {
     completed_at: "2026-08-22T10:01:00Z",
     tokens: { input: 100, output: 50, cache_creation: 25, cache_read: 9_000_000 },
     turns: 3,
+    max_turns: 0,
     is_live: false,
     ...overrides,
   } as IssueProgressTask;
@@ -104,6 +106,44 @@ describe("groupProgressRows", () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe("cancelled");
+  });
+});
+
+describe("turn caps", () => {
+  it("sums the cap across a group, like turns", () => {
+    const rows = groupProgressRows([
+      task({ task_id: "a", turns: 30, max_turns: 40 }),
+      task({ task_id: "b", turns: 12, max_turns: 40 }),
+    ]);
+    expect(rows[0]!.turns).toBe(42);
+    expect(rows[0]!.maxTurns).toBe(80);
+  });
+
+  // One capless member makes the whole denominator unusable. Summing only
+  // the members that declare a cap would print a budget smaller than the one
+  // actually available, so a healthy group would read as an overrun.
+  it("treats the group cap as unknown when any member declares none", () => {
+    const trailing = groupProgressRows([
+      task({ task_id: "a", turns: 30, max_turns: 40 }),
+      task({ task_id: "b", turns: 12, max_turns: 0 }),
+    ]);
+    expect(trailing[0]!.maxTurns).toBe(0);
+
+    // ...and the same when the capless member comes first, so the rule does
+    // not depend on arrival order.
+    const leading = groupProgressRows([
+      task({ task_id: "a", turns: 12, max_turns: 0 }),
+      task({ task_id: "b", turns: 30, max_turns: 40 }),
+    ]);
+    expect(leading[0]!.maxTurns).toBe(0);
+  });
+});
+
+describe("formatTurns", () => {
+  it("shows the cap when known and a bare count when not", () => {
+    expect(formatTurns(21, 20)).toBe("21/20");
+    expect(formatTurns(7, 40)).toBe("7/40");
+    expect(formatTurns(7, 0)).toBe("7");
   });
 });
 

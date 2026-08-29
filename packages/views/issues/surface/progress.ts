@@ -24,6 +24,14 @@ export interface ProgressRow {
   tokens: number;
   turns: number;
   /**
+   * Turn budget for the group, summed the same way `turns` is. 0 means
+   * UNKNOWN — either the agent declares no `--max-turns`, or at least one
+   * member of the group does not, which makes the whole denominator
+   * unusable. Render a bare count in that case; a partial sum understates
+   * the budget and makes a healthy group look like it overran.
+   */
+  maxTurns: number;
+  /**
    * Summed completed_at − started_at over members that have both. null when
    * no member does. The live member contributes nothing — the client adds
    * the ticking part from liveStartedAt.
@@ -99,6 +107,7 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
               status: "completed",
               tokens: 0,
               turns: 0,
+              maxTurns: 0,
               elapsedMs: null,
               liveStartedAt: null,
               taskIds: [],
@@ -111,6 +120,15 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
     row.taskIds.push(t.task_id);
     row.tokens += displayTokens(t.tokens);
     row.turns += t.turns;
+
+    // The cap aggregates like turns, but one missing cap poisons the group:
+    // summing only the members that declare one would print a denominator
+    // smaller than the budget actually available, which reads as an overrun.
+    if (row.count === 1) {
+      row.maxTurns = t.max_turns > 0 ? t.max_turns : 0;
+    } else if (row.maxTurns > 0) {
+      row.maxTurns = t.max_turns > 0 ? row.maxTurns + t.max_turns : 0;
+    }
 
     if (t.is_live) {
       row.status = "live";
@@ -159,6 +177,20 @@ export function completedTotals(rows: ProgressRow[]): {
     turns += r.turns;
   }
   return { elapsedMs, tokens, turns };
+}
+
+/**
+ * Turns against their budget: "21/20" when the cap is known, else the bare
+ * count.
+ *
+ * The denominator is the point. `--max-turns` is the only ceiling a run can
+ * hit that produces no output at all — the agent stops mid-thought and the
+ * step fails with nothing to show — so a reader who can see 21 against 20
+ * diagnoses that in a glance, where a lone "21" says nothing. 0 means the cap
+ * is unknown and MUST render bare: a made-up denominator is worse than none.
+ */
+export function formatTurns(turns: number, maxTurns: number): string {
+  return maxTurns > 0 ? `${turns}/${maxTurns}` : String(turns);
 }
 
 /** Compact token count: exact below 1000, then one decimal with a unit. */

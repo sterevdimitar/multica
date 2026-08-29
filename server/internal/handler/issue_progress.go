@@ -2,8 +2,11 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -49,7 +52,12 @@ type IssueProgressTask struct {
 	CompletedAt *time.Time          `json:"completed_at"`
 	Tokens      IssueProgressTokens `json:"tokens"`
 	Turns       int64               `json:"turns"`
-	IsLive      bool                `json:"is_live"`
+	// MaxTurns is the agent's --max-turns budget, or 0 when it declares
+	// none. The UI renders "21/20" so a run that died at its cap explains
+	// itself; 0 means "unknown", and it renders the bare count instead of
+	// inventing a denominator.
+	MaxTurns int64 `json:"max_turns"`
+	IsLive   bool  `json:"is_live"`
 }
 
 type IssueProgressResponse struct {
@@ -100,8 +108,9 @@ func (h *Handler) GetIssueProgress(w http.ResponseWriter, r *http.Request) {
 				CacheCreation: row.CacheWriteTokens,
 				CacheRead:     row.CacheReadTokens,
 			},
-			Turns:  row.NumTurns,
-			IsLive: liveTaskStatuses[row.Status],
+			Turns:    row.NumTurns,
+			MaxTurns: maxTurnsFromCustomArgs(row.AgentCustomArgs),
+			IsLive:   liveTaskStatuses[row.Status],
 		})
 	}
 
@@ -110,6 +119,41 @@ func (h *Handler) GetIssueProgress(w http.ResponseWriter, r *http.Request) {
 		ExpectedSteps: h.deriveExpectedSteps(r.Context(), uuidToString(issue.WorkspaceID), issue.ID),
 		ServerNow:     time.Now().UTC(),
 	})
+}
+
+// maxTurnsFromCustomArgs reads the --max-turns budget out of an agent's
+// custom_args JSONB, accepting both the separated (`--max-turns`, `20`) and
+// joined (`--max-turns=20`) spellings because either is legal on the CLI and
+// operators type both.
+//
+// It returns 0 for every failure — absent flag, malformed JSON, non-numeric
+// or non-positive value. 0 means UNKNOWN, and the UI must render a bare turn
+// count rather than a denominator it made up. A wrong cap is worse than no
+// cap: "21/30" invites the reader to conclude the run had room left.
+func maxTurnsFromCustomArgs(raw []byte) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var args []string
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return 0
+	}
+	parse := func(s string) int64 {
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil || n <= 0 {
+			return 0
+		}
+		return n
+	}
+	for i, a := range args {
+		if rest, ok := strings.CutPrefix(a, "--max-turns="); ok {
+			return parse(rest)
+		}
+		if a == "--max-turns" && i+1 < len(args) {
+			return parse(args[i+1])
+		}
+	}
+	return 0
 }
 
 // timestampPtr turns a nullable timestamptz into a *time.Time so an unstarted
