@@ -22,7 +22,15 @@ Autopilots 让 [智能体](/agents) **按调度自动开工**——配好 cron �
 
 Autopilot 有两种执行模式，**建议从"先建 issue 模式"开始**：
 
-- **先建 issue 模式**（`create_issue`）—— 默认，**推荐**。每次触发先在工作区里建一个 issue（标题目前只支持一个占位符 `{{date}}`，会插值成 UTC 日期 `YYYY-MM-DD`；其他 `{{...}}` 形式的占位符会在创建时被拒绝，避免拼错以后悄无声息地把原文当成 issue 标题），再按分配流程把 issue 派给智能体。所有工作都落在 issue 看板上，历史、评论、状态和手动分配的 issue 完全一致。
+- **先建 issue 模式**（`create_issue`）—— 默认，**推荐**。每次触发先在工作区里建一个 issue，再按分配流程把 issue 派给智能体。所有工作都落在 issue 看板上，历史、评论、状态和手动分配的 issue 完全一致。
+
+  标题支持三个占位符；其他 `{{...}}` 形式的占位符会在创建时被拒绝，避免拼错以后悄无声息地把原文当成 issue 标题：
+
+  - `{{date}}` —— 插值成 UTC 日期 `YYYY-MM-DD`。
+  - `{{pr}}` —— 对于由 GitHub pull request webhook 事件触发的运行，渲染成 `owner/repo#123`；没有 pull request 时回退成该次运行自身的 id。
+  - `{{pr_title}}` —— 对于由 PR 触发的运行，渲染成该 pull request 自己的标题；没有 pull request 时回退成 autopilot 自己的标题——和今天只用 `{{date}}` 或空模板时渲染出来的文本一样。
+
+  由 PR 触发的运行，其 issue 描述固定以 `owner/repo #123` 这一行开头（注意 `#` 前有空格，跟 `{{pr}}` 不同），紧接着是该 pull request 自身的摘要，都排在 autopilot 自己的描述文字之前。
 - **直跑模式**（`run_only`）—— 不建 issue，直接入队一个 `task`。看板上看不到这一次运行——只能在 Autopilot 的运行历史里看到。
 
 ## 让它按时间跑

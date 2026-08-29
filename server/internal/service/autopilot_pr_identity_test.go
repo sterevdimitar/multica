@@ -3,8 +3,10 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -71,5 +73,61 @@ func TestPullRequestSlugAbsentCases(t *testing.T) {
 func TestPullRequestSlugNeverEmptyWhenPresent(t *testing.T) {
 	if slug, ok := pullRequestSlug(db.AutopilotRun{}); ok && slug == "" {
 		t.Fatal("ok with an empty slug would collapse every PR-less card into one")
+	}
+}
+
+func TestInterpolateTemplateRendersPRTitle(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Title: "PR Review on MR"}
+	ap.IssueTitleTemplate = pgtype.Text{String: "{{pr_title}}", Valid: true}
+
+	got := s.interpolateTemplate(ap, envelopeRun(t, "github.pull_request", testPRPayload), "UTC")
+	want := "fix: don't write issue status when the PR is already merged"
+	if got != want {
+		t.Fatalf("title = %q, want the PR's own title %q", got, want)
+	}
+}
+
+func TestInterpolateTemplatePRTitleFallsBackToAutopilotTitle(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Title: "PR Review on MR"}
+	ap.IssueTitleTemplate = pgtype.Text{String: "{{pr_title}}", Valid: true}
+
+	if got := s.interpolateTemplate(ap, db.AutopilotRun{}, "UTC"); got != "PR Review on MR" {
+		t.Fatalf("PR-less title = %q, want the autopilot's own title", got)
+	}
+}
+
+func TestValidateIssueTitleTemplateAcceptsNewTokens(t *testing.T) {
+	for _, tmpl := range []string{"{{pr_title}}", "{{pr}}", "{{date}} {{pr}}"} {
+		if err := ValidateIssueTitleTemplate(tmpl); err != nil {
+			t.Errorf("%s must validate: %v", tmpl, err)
+		}
+	}
+	if err := ValidateIssueTitleTemplate("{{nope}}"); err == nil {
+		t.Fatal("an unknown token must still be rejected")
+	}
+}
+
+func TestBuildIssueDescriptionLeadsWithPRIdentity(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "Fires the review chain…", Valid: true}}
+
+	got := s.buildIssueDescription(ap, envelopeRun(t, "github.pull_request", testPRPayload), "UTC")
+	first := strings.SplitN(strings.TrimSpace(got.String), "\n", 2)[0]
+	if first != "sterevdimitar/dev-command-center #26" {
+		t.Fatalf("first line = %q, want the identity line with a space before #", first)
+	}
+}
+
+// I7: a non-PR run's description must be unchanged.
+func TestBuildIssueDescriptionUnchangedWithoutPR(t *testing.T) {
+	s := &AutopilotService{}
+	ap := db.Autopilot{Description: pgtype.Text{String: "Fires the review chain…", Valid: true}}
+
+	got := s.buildIssueDescription(ap, db.AutopilotRun{}, "UTC")
+	if !strings.HasPrefix(got.String, "Fires the review chain…") {
+		t.Fatalf("non-PR description must still open with the autopilot description, got %q",
+			got.String[:min(60, len(got.String))])
 	}
 }

@@ -1681,11 +1681,12 @@ func autopilotTriggerLocation(timezone string) (*time.Location, string) {
 // the agent only sees the issue body, never the run's trigger_payload).
 func (s *AutopilotService) buildIssueDescription(ap db.Autopilot, run db.AutopilotRun, triggerTimezone string) pgtype.Text {
 	triggeredAt := formatAutopilotRunTimestamp(run, triggerTimezone)
-	var b strings.Builder
-	b.WriteString(ap.Description.String)
-	b.WriteString("\n\n---\n*Autopilot run triggered at ")
-	b.WriteString(triggeredAt)
-	b.WriteString(". After starting work, rename this issue to accurately reflect what you are doing.*")
+	writeBoilerplate := func(b *strings.Builder) {
+		b.WriteString(ap.Description.String)
+		b.WriteString("\n\n---\n*Autopilot run triggered at ")
+		b.WriteString(triggeredAt)
+		b.WriteString(". After starting work, rename this issue to accurately reflect what you are doing.*")
+	}
 
 	if run.Source == "webhook" && len(run.TriggerPayload) > 0 {
 		event := "webhook.received"
@@ -1704,8 +1705,6 @@ func (s *AutopilotService) buildIssueDescription(ap db.Autopilot, run db.Autopil
 				}
 			}
 		}
-		b.WriteString("\n\nWebhook event: ")
-		b.WriteString(event)
 
 		// A GitHub pull_request payload is ~30 KB of JSON, almost all of it
 		// API links nobody follows. Rendering the PR itself instead gives
@@ -1715,9 +1714,24 @@ func (s *AutopilotService) buildIssueDescription(ap db.Autopilot, run db.Autopil
 		// only channel for event context (see the doc comment above) and we
 		// have no provider knowledge to summarise it with.
 		if pr, ok := parseGitHubPullRequest(event, env.EventPayload); ok {
+			// PR-triggered runs lead with the identity line — note the space
+			// before '#', unlike the dedupe key — so the board's subtitle
+			// shows it, then the pull-request block, then the autopilot's own
+			// boilerplate and the "Autopilot run triggered at …" line, which
+			// are identical on every card and belong nowhere near the top.
+			// Non-PR runs (below) keep today's ordering byte-for-byte (I7).
+			var b strings.Builder
+			fmt.Fprintf(&b, "%s #%d", pr.Repo, pr.Number)
 			writePullRequestSummary(&b, pr)
+			b.WriteString("\n\n---\n\n")
+			writeBoilerplate(&b)
 			return pgtype.Text{String: b.String(), Valid: true}
 		}
+
+		var b strings.Builder
+		writeBoilerplate(&b)
+		b.WriteString("\n\nWebhook event: ")
+		b.WriteString(event)
 
 		if len(payloadJSON) == 0 {
 			if pretty, err := prettifyJSON(run.TriggerPayload); err == nil {
@@ -1729,8 +1743,11 @@ func (s *AutopilotService) buildIssueDescription(ap db.Autopilot, run db.Autopil
 		b.WriteString("\n\nWebhook payload:\n```json\n")
 		b.Write(payloadJSON)
 		b.WriteString("\n```")
+		return pgtype.Text{String: b.String(), Valid: true}
 	}
 
+	var b strings.Builder
+	writeBoilerplate(&b)
 	return pgtype.Text{String: b.String(), Valid: true}
 }
 
@@ -1756,29 +1773,33 @@ type githubPullRequest struct {
 	IsDraft bool
 }
 
-// pullRequestSlug returns the stable identity of the pull request that caused
-// this run, as "owner/repo#123", and whether one was found.
-//
-// It unwraps the same {event, eventPayload} envelope buildIssueDescription
-// reads and reuses parseGitHubPullRequest, so the two cannot disagree about
-// what counts as a pull request payload.
-//
-// This value is the DEDUPE KEY (issue.metadata.pull_request), not a display
-// string. It deliberately has no space before the '#': the board subtitle
-// renders "owner/repo #123" separately, and neither is derived from the other
-// at read time.
-func pullRequestSlug(run db.AutopilotRun) (string, bool) {
+// pullRequestFor unwraps the {event, eventPayload} envelope buildIssueDescription
+// reads and reuses parseGitHubPullRequest, so pullRequestSlug and the
+// {{pr}}/{{pr_title}} template tokens cannot disagree about what counts as a
+// pull request payload. This is the envelope-unwrap half both share.
+func pullRequestFor(run db.AutopilotRun) (githubPullRequest, bool) {
 	if run.Source != "webhook" || len(run.TriggerPayload) == 0 {
-		return "", false
+		return githubPullRequest{}, false
 	}
 	var env struct {
 		Event        string          `json:"event"`
 		EventPayload json.RawMessage `json:"eventPayload"`
 	}
 	if err := json.Unmarshal(run.TriggerPayload, &env); err != nil {
-		return "", false
+		return githubPullRequest{}, false
 	}
-	pr, ok := parseGitHubPullRequest(env.Event, env.EventPayload)
+	return parseGitHubPullRequest(env.Event, env.EventPayload)
+}
+
+// pullRequestSlug returns the stable identity of the pull request that caused
+// this run, as "owner/repo#123", and whether one was found.
+//
+// This value is the DEDUPE KEY (issue.metadata.pull_request), not a display
+// string. It deliberately has no space before the '#': the board subtitle
+// renders "owner/repo #123" separately, and neither is derived from the other
+// at read time.
+func pullRequestSlug(run db.AutopilotRun) (string, bool) {
+	pr, ok := pullRequestFor(run)
 	if !ok || strings.TrimSpace(pr.Repo) == "" || pr.Number <= 0 {
 		return "", false
 	}
@@ -1918,6 +1939,20 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 		switch name {
 		case "date":
 			return triggerDate
+		case "pr_title":
+			// The card's headline. Falls back to the autopilot's own title —
+			// today's text — because a PR-less run still needs a name, and the
+			// title no longer carries dedupe identity (that lives in
+			// issue.metadata), so a repeated fallback title is harmless.
+			if pr, ok := pullRequestFor(run); ok && strings.TrimSpace(pr.Title) != "" {
+				return strings.TrimSpace(pr.Title)
+			}
+			return ap.Title
+		case "pr":
+			if slug, ok := pullRequestSlug(run); ok {
+				return slug
+			}
+			return util.UUIDToString(run.ID)
 		default:
 			return match
 		}
@@ -1928,7 +1963,7 @@ func (s *AutopilotService) interpolateTemplate(ap db.Autopilot, run db.Autopilot
 // interpolateTemplate will substitute. Keep this in sync with the
 // substitution logic above and with the docs in autopilots.mdx /
 // autopilots.zh.mdx.
-var SupportedIssueTitleTemplateVariables = []string{"date"}
+var SupportedIssueTitleTemplateVariables = []string{"date", "pr", "pr_title"}
 
 // ValidateIssueTitleTemplate rejects templates that contain any {{...}} token
 // other than the supported set. An empty template is valid (the autopilot

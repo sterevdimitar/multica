@@ -237,8 +237,15 @@ func TestBuildIssueDescription_GitHubPullRequestIsHumanReadable(t *testing.T) {
 	ap := db.Autopilot{Description: pgtype.Text{String: "watch PRs", Valid: true}}
 	got := s.buildIssueDescription(ap, webhookRun(prPayload(t, "Fixes the widget.\n\n## Details\nlots of prose")), "UTC").String
 
-	// The autopilot's own description and the rename instruction stay put.
-	if !strings.HasPrefix(got, "watch PRs") {
+	// One Card Per Pull Request (2026-08-28) moved the autopilot's own
+	// description and the rename instruction BELOW the pull-request block for
+	// PR-triggered runs — they're identical on every card and don't belong at
+	// the top (design §3.3). The identity line leads instead; the boilerplate
+	// is still preserved verbatim, just relocated.
+	if !strings.HasPrefix(got, "acme/widgets #6") {
+		t.Errorf("PR-triggered description must lead with the identity line:\n%s", got)
+	}
+	if !strings.Contains(got, "watch PRs") {
 		t.Errorf("user description not preserved:\n%s", got)
 	}
 	if !strings.Contains(got, "*Autopilot run triggered at") {
