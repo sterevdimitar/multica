@@ -109,6 +109,40 @@ func LockAndFindRecentAutopilotDuplicate(
 	return duplicate, true, nil
 }
 
+// LockAndFindOpenPullRequestIssue takes the same advisory lock as
+// LockAndFindRecentAutopilotDuplicate (I4) and then looks the card up by its
+// pull-request metadata key. Same lock, because the race it guards is the
+// same one: two deliveries for one PR arriving together must not both miss
+// and both create.
+//
+// There is deliberately no time window. The key is exact, so a window would
+// only be a way to start creating second cards on long-lived pull requests —
+// which is the bug, not a safeguard.
+func LockAndFindOpenPullRequestIssue(
+	ctx context.Context, q *db.Queries,
+	workspaceID, autopilotID pgtype.UUID, slug string,
+) (db.Issue, bool, error) {
+	if slug == "" || !autopilotID.Valid {
+		return db.Issue{}, false, nil
+	}
+	if err := q.LockIssueDuplicateKey(ctx, pullRequestLockKey(workspaceID, autopilotID, slug)); err != nil {
+		return db.Issue{}, false, err
+	}
+
+	issue, err := q.FindOpenAutopilotIssueForPullRequest(ctx, db.FindOpenAutopilotIssueForPullRequestParams{
+		WorkspaceID:     workspaceID,
+		OriginID:        autopilotID,
+		PullRequestSlug: slug,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.Issue{}, false, nil
+		}
+		return db.Issue{}, false, err
+	}
+	return issue, true, nil
+}
+
 func lockKey(workspaceID, projectID, parentIssueID pgtype.UUID, normalizedTitle string) string {
 	return strings.Join([]string{
 		"issue-active-duplicate",
@@ -126,5 +160,14 @@ func recentAutopilotLockKey(workspaceID, autopilotID, projectID pgtype.UUID, nor
 		util.UUIDToString(autopilotID),
 		util.UUIDToString(projectID),
 		normalizedTitle,
+	}, "|")
+}
+
+func pullRequestLockKey(workspaceID, autopilotID pgtype.UUID, slug string) string {
+	return strings.Join([]string{
+		"autopilot-pull-request",
+		util.UUIDToString(workspaceID),
+		util.UUIDToString(autopilotID),
+		slug,
 	}, "|")
 }

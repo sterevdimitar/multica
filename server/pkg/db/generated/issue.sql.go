@@ -466,6 +466,57 @@ func (q *Queries) FindActiveDuplicateIssue(ctx context.Context, arg FindActiveDu
 	return i, err
 }
 
+const findOpenAutopilotIssueForPullRequest = `-- name: FindOpenAutopilotIssueForPullRequest :one
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties FROM issue
+WHERE workspace_id = $1
+  AND origin_type = 'autopilot'
+  AND origin_id = $2
+  AND metadata ->> 'pull_request' = $3::text
+  AND status NOT IN ('done', 'cancelled')
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type FindOpenAutopilotIssueForPullRequestParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	OriginID        pgtype.UUID `json:"origin_id"`
+	PullRequestSlug string      `json:"pull_request_slug"`
+}
+
+func (q *Queries) FindOpenAutopilotIssueForPullRequest(ctx context.Context, arg FindOpenAutopilotIssueForPullRequestParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, findOpenAutopilotIssueForPullRequest, arg.WorkspaceID, arg.OriginID, arg.PullRequestSlug)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+	)
+	return i, err
+}
+
 const findRecentAutopilotDuplicateIssue = `-- name: FindRecentAutopilotDuplicateIssue :one
 SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata, i.stage, i.properties FROM issue i
 WHERE i.workspace_id = $1

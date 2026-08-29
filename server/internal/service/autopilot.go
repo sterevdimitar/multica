@@ -599,29 +599,12 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 	}
 	projectID := currentAutopilot.ProjectID
 
-	if duplicate, found, err := issueguard.LockAndFindRecentAutopilotDuplicate(
-		ctx, qtx, ap.WorkspaceID, ap.ID, projectID, title, autopilotRecentDuplicateWindow,
-	); err != nil {
-		return fmt.Errorf("recent duplicate guard: %w", err)
-	} else if found {
-		return &errDispatchSkipped{reason: "recent duplicate autopilot issue: " + util.UUIDToString(duplicate.ID), code: dispatch.ReasonAlreadyActive}
-	}
-
-	issueNumber, err := qtx.IncrementIssueCounter(ctx, ap.WorkspaceID)
-	if err != nil {
-		return fmt.Errorf("increment issue counter: %w", err)
-	}
-
-	newPosition, err := issueposition.NextTopPosition(ctx, tx, ap.WorkspaceID, "todo")
-	if err != nil {
-		return fmt.Errorf("get next issue position: %w", err)
-	}
-
 	// The dedupe key (I3/I6). Absent — not empty — when there is no pull
 	// request: an empty key would match every other PR-less card and collapse
 	// them into one.
 	issueMetadata := []byte("{}")
-	if slug, ok := pullRequestSlug(*run); ok {
+	slug, hasPR := pullRequestSlug(*run)
+	if hasPR {
 		raw, err := json.Marshal(map[string]string{"pull_request": slug})
 		if err != nil {
 			return fmt.Errorf("marshal issue metadata: %w", err)
@@ -629,97 +612,152 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		issueMetadata = raw
 	}
 
-	issue, err := qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
-		WorkspaceID:  ap.WorkspaceID,
-		Title:        title,
-		Description:  description,
-		Status:       "todo",
-		Priority:     "none",
-		AssigneeType: pgtype.Text{String: ap.AssigneeType, Valid: true},
-		AssigneeID:   ap.AssigneeID,
-		// The agent that the autopilot dispatches to is the issue's creator,
-		// not the human who originally configured the autopilot. The latter
-		// is captured separately via origin_type=autopilot + origin_id. For
-		// squad-assigned autopilots, the creator is the resolved leader —
-		// the same agent the issue listener will end up enqueueing.
-		CreatorType:   "agent",
-		CreatorID:     leader.ID,
-		ParentIssueID: pgtype.UUID{},
-		Position:      newPosition,
-		StartDate:     pgtype.Date{},
-		DueDate:       pgtype.Date{},
-		Number:        issueNumber,
-		ProjectID:     projectID,
-		OriginType:    pgtype.Text{String: "autopilot", Valid: true},
-		OriginID:      ap.ID,
-		Metadata:      issueMetadata,
-	})
-	if err != nil {
-		return fmt.Errorf("create issue: %w", err)
-	}
-
-	// Fan out the default subscriber template inside the same tx as the
-	// issue insert, before EventIssueCreated fires — so notification
-	// listeners see the full subscriber set on the first event instead of
-	// racing the listener that would otherwise hydrate the template.
-	templateSubs, err := qtx.ListAutopilotSubscribers(ctx, ap.ID)
-	if err != nil {
-		return fmt.Errorf("list autopilot subscribers: %w", err)
-	}
-	for _, sub := range templateSubs {
-		if err := qtx.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{
-			IssueID:  issue.ID,
-			UserType: sub.UserType,
-			UserID:   sub.UserID,
-			Reason:   "autopilot",
-		}); err != nil {
-			return fmt.Errorf("add autopilot subscriber to issue: %w", err)
+	var existing db.Issue
+	var reusedExisting bool
+	if hasPR {
+		found, ok, err := issueguard.LockAndFindOpenPullRequestIssue(
+			ctx, qtx, ap.WorkspaceID, ap.ID, slug)
+		if err != nil {
+			return fmt.Errorf("pull-request card lookup: %w", err)
+		}
+		existing, reusedExisting = found, ok
+	} else {
+		// Non-PR autopilots keep the title-and-window guard unchanged (I7).
+		duplicate, found, err := issueguard.LockAndFindRecentAutopilotDuplicate(
+			ctx, qtx, ap.WorkspaceID, ap.ID, projectID, title, autopilotRecentDuplicateWindow,
+		)
+		if err != nil {
+			return fmt.Errorf("recent duplicate guard: %w", err)
+		}
+		if found {
+			return &errDispatchSkipped{reason: "recent duplicate autopilot issue: " + util.UUIDToString(duplicate.ID), code: dispatch.ReasonAlreadyActive}
 		}
 	}
 
-	// Link the run inside the same tx as the issue insert. This makes the
-	// recent-duplicate guard count only fully observable autopilot issues and
-	// avoids a crash window where recovery would see an orphan issue but no
-	// linked run.
-	updatedRun, err := qtx.UpdateAutopilotRunIssueCreated(ctx, db.UpdateAutopilotRunIssueCreatedParams{
-		ID:      run.ID,
-		IssueID: issue.ID,
-	})
-	if err != nil {
-		return fmt.Errorf("link run to issue: %w", err)
+	var issue db.Issue
+	if reusedExisting {
+		// ATTACH, do not skip (I1). The old path marked the run `skipped` and
+		// left the pull request unreviewed. The lookup query already excludes
+		// `done`/`cancelled` cards (I2), so reaching here means the card is
+		// still open.
+		updatedRun, err := qtx.UpdateAutopilotRunIssueCreated(ctx, db.UpdateAutopilotRunIssueCreatedParams{
+			ID:      run.ID,
+			IssueID: existing.ID,
+		})
+		if err != nil {
+			return fmt.Errorf("link run to existing issue: %w", err)
+		}
+		*run = updatedRun
+		issue = existing
+
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit tx: %w", err)
+		}
+		// No EventIssueCreated / subscriber fan-out here: the card already
+		// exists and already went through that path once, at its own creation.
+	} else {
+		issueNumber, err := qtx.IncrementIssueCounter(ctx, ap.WorkspaceID)
+		if err != nil {
+			return fmt.Errorf("increment issue counter: %w", err)
+		}
+
+		newPosition, err := issueposition.NextTopPosition(ctx, tx, ap.WorkspaceID, "todo")
+		if err != nil {
+			return fmt.Errorf("get next issue position: %w", err)
+		}
+
+		issue, err = qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
+			WorkspaceID:  ap.WorkspaceID,
+			Title:        title,
+			Description:  description,
+			Status:       "todo",
+			Priority:     "none",
+			AssigneeType: pgtype.Text{String: ap.AssigneeType, Valid: true},
+			AssigneeID:   ap.AssigneeID,
+			// The agent that the autopilot dispatches to is the issue's creator,
+			// not the human who originally configured the autopilot. The latter
+			// is captured separately via origin_type=autopilot + origin_id. For
+			// squad-assigned autopilots, the creator is the resolved leader —
+			// the same agent the issue listener will end up enqueueing.
+			CreatorType:   "agent",
+			CreatorID:     leader.ID,
+			ParentIssueID: pgtype.UUID{},
+			Position:      newPosition,
+			StartDate:     pgtype.Date{},
+			DueDate:       pgtype.Date{},
+			Number:        issueNumber,
+			ProjectID:     projectID,
+			OriginType:    pgtype.Text{String: "autopilot", Valid: true},
+			OriginID:      ap.ID,
+			Metadata:      issueMetadata,
+		})
+		if err != nil {
+			return fmt.Errorf("create issue: %w", err)
+		}
+
+		// Fan out the default subscriber template inside the same tx as the
+		// issue insert, before EventIssueCreated fires — so notification
+		// listeners see the full subscriber set on the first event instead of
+		// racing the listener that would otherwise hydrate the template.
+		templateSubs, err := qtx.ListAutopilotSubscribers(ctx, ap.ID)
+		if err != nil {
+			return fmt.Errorf("list autopilot subscribers: %w", err)
+		}
+		for _, sub := range templateSubs {
+			if err := qtx.AddIssueSubscriber(ctx, db.AddIssueSubscriberParams{
+				IssueID:  issue.ID,
+				UserType: sub.UserType,
+				UserID:   sub.UserID,
+				Reason:   "autopilot",
+			}); err != nil {
+				return fmt.Errorf("add autopilot subscriber to issue: %w", err)
+			}
+		}
+
+		// Link the run inside the same tx as the issue insert. This makes the
+		// recent-duplicate guard count only fully observable autopilot issues and
+		// avoids a crash window where recovery would see an orphan issue but no
+		// linked run.
+		updatedRun, err := qtx.UpdateAutopilotRunIssueCreated(ctx, db.UpdateAutopilotRunIssueCreatedParams{
+			ID:      run.ID,
+			IssueID: issue.ID,
+		})
+		if err != nil {
+			return fmt.Errorf("link run to issue: %w", err)
+		}
+		*run = updatedRun
+
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit tx: %w", err)
+		}
+
+		// Publish issue:created so the existing event chain fires
+		// (subscriber listeners, activity listeners, notification listeners). For
+		// squad autopilots, this is what triggers shouldEnqueueSquadLeaderOnAssign
+		// → enqueueSquadLeaderTask — no separate squad-routing code needed here.
+		prefix := s.getIssuePrefix(ap.WorkspaceID)
+		s.Bus.Publish(events.Event{
+			Type:        protocol.EventIssueCreated,
+			WorkspaceID: util.UUIDToString(ap.WorkspaceID),
+			ActorType:   "agent",
+			ActorID:     util.UUIDToString(leader.ID),
+			Payload: map[string]any{
+				"issue": issueToMap(issue, prefix),
+			},
+		})
+		s.captureIssueCreatedFromAutopilot(ap, run, issue, leader.ID)
+
+		// The issue:created notification listener only handles handler.IssueResponse
+		// payloads and only direct-notifies the assignee + @mentions; subscribers
+		// don't get an inbox at creation time on the manual path because there are
+		// none yet. The autopilot path is different: the template subscribers were
+		// fanned out into issue_subscriber inside the tx above, so they exist at the
+		// moment of creation and OQ3 says they should receive the same subscription
+		// events as reason='manual'. Issue creation is one such event — so write
+		// the inbox rows directly here. Done after commit so a failure here doesn't
+		// roll back the issue itself.
+		s.notifyAutopilotSubscribersOnCreate(ctx, ap, issue, leader.ID, templateSubs)
 	}
-	*run = updatedRun
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
-	}
-
-	// Publish issue:created so the existing event chain fires
-	// (subscriber listeners, activity listeners, notification listeners). For
-	// squad autopilots, this is what triggers shouldEnqueueSquadLeaderOnAssign
-	// → enqueueSquadLeaderTask — no separate squad-routing code needed here.
-	prefix := s.getIssuePrefix(ap.WorkspaceID)
-	s.Bus.Publish(events.Event{
-		Type:        protocol.EventIssueCreated,
-		WorkspaceID: util.UUIDToString(ap.WorkspaceID),
-		ActorType:   "agent",
-		ActorID:     util.UUIDToString(leader.ID),
-		Payload: map[string]any{
-			"issue": issueToMap(issue, prefix),
-		},
-	})
-	s.captureIssueCreatedFromAutopilot(ap, run, issue, leader.ID)
-
-	// The issue:created notification listener only handles handler.IssueResponse
-	// payloads and only direct-notifies the assignee + @mentions; subscribers
-	// don't get an inbox at creation time on the manual path because there are
-	// none yet. The autopilot path is different: the template subscribers were
-	// fanned out into issue_subscriber inside the tx above, so they exist at the
-	// moment of creation and OQ3 says they should receive the same subscription
-	// events as reason='manual'. Issue creation is one such event — so write
-	// the inbox rows directly here. Done after commit so a failure here doesn't
-	// roll back the issue itself.
-	s.notifyAutopilotSubscribersOnCreate(ctx, ap, issue, leader.ID, templateSubs)
 
 	// Enqueue agent task via the existing flow. Squad-assigned autopilots
 	// route to the resolved leader as the executing agent (Path A from
