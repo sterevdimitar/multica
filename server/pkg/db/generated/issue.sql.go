@@ -1491,3 +1491,57 @@ func (q *Queries) UpdateIssueStatus(ctx context.Context, arg UpdateIssueStatusPa
 	)
 	return i, err
 }
+
+const updateIssueStatusAndUnassign = `-- name: UpdateIssueStatusAndUnassign :one
+UPDATE issue SET
+    status = $2,
+    assignee_type = NULL,
+    assignee_id = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
+`
+
+type UpdateIssueStatusAndUnassignParams struct {
+	ID          pgtype.UUID `json:"id"`
+	Status      string      `json:"status"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// Workspace_id in the WHERE clause is a SQL-layer tenant guard; see DeleteIssue.
+// Both assignee fields must be nulled in this single statement: a half-set
+// (assignee_type, assignee_id) pair is rejected with 400 by the API layer,
+// and a card that is blocked but still assigned is the runaway shape.
+func (q *Queries) UpdateIssueStatusAndUnassign(ctx context.Context, arg UpdateIssueStatusAndUnassignParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueStatusAndUnassign, arg.ID, arg.Status, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+	)
+	return i, err
+}

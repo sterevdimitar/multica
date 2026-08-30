@@ -121,6 +121,19 @@ UPDATE issue SET
 WHERE id = $1 AND workspace_id = $3
 RETURNING *;
 
+-- name: UpdateIssueStatusAndUnassign :one
+-- Workspace_id in the WHERE clause is a SQL-layer tenant guard; see DeleteIssue.
+-- Both assignee fields must be nulled in this single statement: a half-set
+-- (assignee_type, assignee_id) pair is rejected with 400 by the API layer,
+-- and a card that is blocked but still assigned is the runaway shape.
+UPDATE issue SET
+    status = $2,
+    assignee_type = NULL,
+    assignee_id = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3
+RETURNING *;
+
 -- name: CreateIssueWithOrigin :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
