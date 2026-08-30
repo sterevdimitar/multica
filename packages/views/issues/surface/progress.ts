@@ -32,6 +32,14 @@ export interface ProgressRow {
    */
   maxTurns: number;
   /**
+   * Why the group's failed member stopped, verbatim from the run — "" when
+   * nothing in the group failed or the server did not say. The FIRST failure
+   * in the group wins: a later member's reason would describe a different
+   * run than the ✗ the reader is looking at, and the first is the one that
+   * broke the chain.
+   */
+  failureReason: string;
+  /**
    * Summed completed_at − started_at over members that have both. null when
    * no member does. The live member contributes nothing — the client adds
    * the ticking part from liveStartedAt.
@@ -108,6 +116,7 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
               tokens: 0,
               turns: 0,
               maxTurns: 0,
+              failureReason: "",
               elapsedMs: null,
               liveStartedAt: null,
               taskIds: [],
@@ -143,6 +152,14 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
     if (row.status !== "live") {
       if (FAILED_STATUSES.has(t.status)) {
         row.status = "failed";
+        // Read defensively rather than trusting the declared type: this is
+        // wire data, and a server that predates the field omits it entirely.
+        // The schema defaults it to "", but the payload is .loose() and a
+        // non-string here must degrade to "no reason given", never crash a
+        // popover whose job is to explain a failure.
+        if (!row.failureReason && typeof t.failure_reason === "string") {
+          row.failureReason = t.failure_reason;
+        }
       } else if (row.status === "completed" && t.status === "cancelled") {
         // "cancelled" only survives while every member so far is cancelled.
         row.status = row.count === 1 ? "cancelled" : row.status;
@@ -180,17 +197,36 @@ export function completedTotals(rows: ProgressRow[]): {
 }
 
 /**
- * Turns against their budget: "21/20" when the cap is known, else the bare
- * count.
+ * The turn count, bare.
  *
- * The denominator is the point. `--max-turns` is the only ceiling a run can
- * hit that produces no output at all — the agent stops mid-thought and the
- * step fails with nothing to show — so a reader who can see 21 against 20
- * diagnoses that in a glance, where a lone "21" says nothing. 0 means the cap
- * is unknown and MUST render bare: a made-up denominator is worse than none.
+ * IT USED TO RENDER "21/20", and that was wrong — not imprecise, wrong. The
+ * numerator and the denominator count different things: `--max-turns` counts
+ * tool-use turns ONLY, while the reported count also includes the final
+ * text-only turn and (measured, not documented) each parallel tool call. A
+ * run that stops exactly at its budget therefore always reports above it, and
+ * so can one that never came close. Readers were diagnosing overruns that had
+ * not happened.
+ *
+ * The signal the ratio was carrying — "this run died at its ceiling" — is now
+ * carried by `failureReason`, which is the run's own statement of what
+ * stopped it rather than an inference from two incompatible numbers.
+ *
+ * maxTurns is still on ProgressRow: it is a real fact about the agent, and a
+ * future display that counts tool-use turns could compare against it honestly.
  */
-export function formatTurns(turns: number, maxTurns: number): string {
-  return maxTurns > 0 ? `${turns}/${maxTurns}` : String(turns);
+export function formatTurns(turns: number, _maxTurns: number): string {
+  return String(turns);
+}
+
+/**
+ * A failure reason shortened for the row: `claude-max-turns` -> "max turns".
+ * Unknown reasons pass through with separators softened, because a reason
+ * this code has not heard of is still the run's own word and is better than
+ * a generic "failed".
+ */
+export function shortFailureReason(reason: string): string {
+  if (!reason) return "";
+  return reason.replace(/^claude-/, "").replace(/[-_]/g, " ");
 }
 
 /** Compact token count: exact below 1000, then one decimal with a unit. */
