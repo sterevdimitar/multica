@@ -216,10 +216,10 @@ func TestMarkIssueRunningPublishesIssueUpdated(t *testing.T) {
 // TestDispatchProceedsWhenTheStatusWriteFails proves the invariant that the
 // in_progress status write is a side effect of dispatch, never a
 // precondition: dispatchWebhookTask must still transition the task to
-// `dispatched` even when the subsequent MarkIssueRunning plumbing can't
-// write a status (here: the task's issue_id points at a row that doesn't
-// exist, so dispatchWebhookTask's own GetIssue call errors before
-// MarkIssueRunning is even reached).
+// `dispatched` even when MarkIssueRunning's own UPDATE of issue.status fails.
+// The fixture is entirely valid (no FK games) - it forces the failure with a
+// trigger, scoped by a WHEN clause to only the fixture's own issue row, that
+// raises on the real UPDATE issue SET status = ... statement.
 func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 	ctx := context.Background()
 	pool := newTaskClaimRacePool(t)
@@ -232,14 +232,26 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 		"Dispatch Survives Test", fmt.Sprintf("dispatch-survives-%d@multica.ai", suffix)).Scan(&userID); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, userID)
+	})
+
 	var workspaceID string
 	if err := pool.QueryRow(ctx, `INSERT INTO workspace (name, slug, description, issue_prefix) VALUES ($1,$2,$3,$4) RETURNING id`,
 		"Dispatch Survives Test", fmt.Sprintf("dispatch-survives-%d", suffix), "temp dispatch-survives test", "DST").Scan(&workspaceID); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, workspaceID)
+	})
+
 	if _, err := pool.Exec(ctx, `INSERT INTO member (workspace_id, user_id, role) VALUES ($1,$2,'owner')`, workspaceID, userID); err != nil {
 		t.Fatalf("create member: %v", err)
 	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM member WHERE workspace_id = $1 AND user_id = $2`, workspaceID, userID)
+	})
+
 	var runtimeID string
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, visibility, owner_id, webhook_url, webhook_secret, webhook_event_type)
@@ -247,6 +259,10 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 		RETURNING id`, workspaceID, userID).Scan(&runtimeID); err != nil {
 		t.Fatalf("create runtime: %v", err)
 	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+	})
+
 	var agentID string
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO agent (workspace_id, name, description, runtime_mode, runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id)
@@ -254,44 +270,63 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 		RETURNING id`, workspaceID, runtimeID, userID).Scan(&agentID); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM agent WHERE id = $1`, agentID)
+	})
 
-	// A syntactically valid UUID that matches no issue row, so
-	// dispatchWebhookTask's own GetIssue call (and, were it reached,
-	// MarkIssueRunning's) can never succeed. agent_task_queue.issue_id has an
-	// ON DELETE CASCADE foreign key to issue(id), which a normal INSERT would
-	// reject for a dangling id — so this fixture inserts on a dedicated
-	// connection with session_replication_role set to replica, which disables
-	// FK-enforcement triggers for that connection only, to construct the
-	// otherwise-impossible dangling reference deliberately.
-	missingIssueID := "99999999-9999-9999-9999-999999999999"
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire conn: %v", err)
+	var issueID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position)
+		VALUES ($1, 'dispatch survives issue', 'todo', 'none', $2, 'member', 700003, 0)
+		RETURNING id`, workspaceID, userID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
 	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `SET session_replication_role = replica`); err != nil {
-		t.Fatalf("disable triggers: %v", err)
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	// Force the real UPDATE issue SET status = ... to fail, scoped by a WHEN
+	// clause to exactly this fixture's issue row so it cannot affect anything
+	// else in the shared database.
+	triggerName := fmt.Sprintf("dispatch_survives_status_fail_%d", suffix)
+	functionName := triggerName + "_fn"
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION %s()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $$
+		BEGIN
+			RAISE EXCEPTION 'dispatch_survives: forced status write failure';
+		END;
+		$$;
+	`, quoteIdent(functionName))); err != nil {
+		t.Fatalf("create status-fail trigger function: %v", err)
 	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", quoteIdent(functionName)))
+	})
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE UPDATE OF status ON issue
+		FOR EACH ROW
+		WHEN (NEW.id = %s::uuid)
+		EXECUTE FUNCTION %s();
+	`, quoteIdent(triggerName), quoteLiteral(issueID), quoteIdent(functionName))); err != nil {
+		t.Fatalf("create status-fail trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON issue", quoteIdent(triggerName)))
+	})
+
 	var taskID string
-	insertErr := conn.QueryRow(ctx, `
+	if err := pool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context)
 		VALUES ($1, $2, $3, 'queued', 0, '{}'::jsonb)
-		RETURNING id`, agentID, runtimeID, missingIssueID).Scan(&taskID)
-	if _, resetErr := conn.Exec(ctx, `SET session_replication_role = DEFAULT`); resetErr != nil {
-		t.Fatalf("reset triggers: %v", resetErr)
+		RETURNING id`, agentID, runtimeID, issueID).Scan(&taskID); err != nil {
+		t.Fatalf("create queued task: %v", err)
 	}
-	if insertErr != nil {
-		t.Fatalf("create queued task with dangling issue_id: %v", insertErr)
-	}
-
 	t.Cleanup(func() {
-		c := context.Background()
-		pool.Exec(c, `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
-		pool.Exec(c, `DELETE FROM agent WHERE id = $1`, agentID)
-		pool.Exec(c, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
-		pool.Exec(c, `DELETE FROM member WHERE workspace_id = $1 AND user_id = $2`, workspaceID, userID)
-		pool.Exec(c, `DELETE FROM workspace WHERE id = $1`, workspaceID)
-		pool.Exec(c, `DELETE FROM "user" WHERE id = $1`, userID)
+		pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
 	})
 
 	task, err := queries.GetAgentTask(ctx, util.MustParseUUID(taskID))
@@ -309,11 +344,19 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 
 	svc.dispatchWebhookTask(ctx, task, runtime, agent)
 
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&status); err != nil {
+	var taskStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&taskStatus); err != nil {
 		t.Fatalf("read task status: %v", err)
 	}
-	if status != "dispatched" {
-		t.Fatalf("task status = %q, want dispatched despite the status-write failure", status)
+	if taskStatus != "dispatched" {
+		t.Fatalf("task status = %q, want dispatched despite the status-write failure", taskStatus)
+	}
+
+	var issueStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&issueStatus); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if issueStatus != StatusTodo {
+		t.Fatalf("issue status = %q, want unchanged %q since the write genuinely failed", issueStatus, StatusTodo)
 	}
 }

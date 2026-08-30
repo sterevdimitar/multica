@@ -281,6 +281,10 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 		if issue, err := s.Queries.GetIssue(ctx, dispatched.IssueID); err != nil {
 			slog.Error("webhook: load issue for run-start status", "err", err, "task_id", taskID)
 		} else {
+			// MarkIssueRunning re-reads this same issue by ID before acting on
+			// it. That is deliberate, not a redundant round-trip to delete: the
+			// issue loaded here can be stale, and trusting a stale `done` would
+			// let this dispatch silently clobber a merge nobody asked to cancel.
 			s.MarkIssueRunning(ctx, issue, agent.Name)
 		}
 	}
