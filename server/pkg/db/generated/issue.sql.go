@@ -1509,9 +1509,13 @@ type UpdateIssueStatusAndUnassignParams struct {
 }
 
 // Workspace_id in the WHERE clause is a SQL-layer tenant guard; see DeleteIssue.
-// Both assignee fields must be nulled in this single statement: a half-set
-// (assignee_type, assignee_id) pair is rejected with 400 by the API layer,
-// and a card that is blocked but still assigned is the runaway shape.
+// Both assignee fields are nulled here rather than through the generic issue
+// update path, which cannot clear them together: a half-set (assignee_type,
+// assignee_id) pair is rejected with 400 by the API layer. Clearing them in
+// the same statement as the status write also closes the window where an
+// issue is blocked but still assigned, which is the shape of the 2026-08-07
+// runaway: Multica wakes an assigned agent on any member comment that
+// mentions nobody, so a still-assigned issue re-triggers its own agent.
 func (q *Queries) UpdateIssueStatusAndUnassign(ctx context.Context, arg UpdateIssueStatusAndUnassignParams) (Issue, error) {
 	row := q.db.QueryRow(ctx, updateIssueStatusAndUnassign, arg.ID, arg.Status, arg.WorkspaceID)
 	var i Issue
