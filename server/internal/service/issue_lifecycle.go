@@ -100,3 +100,41 @@ func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agen
 	}
 	s.broadcastIssueUpdated(updated, prevStatus)
 }
+
+// MarkIssueBlocked parks a card whose task failed, so a human can investigate.
+// Clears the assignee in the same statement as the status write. Best-effort,
+// same rationale as MarkIssueRunning: every failure is logged and swallowed,
+// and this never returns an error because no caller may change fail-task
+// behaviour on its result.
+//
+// The passed issue may be stale, so this re-reads its current status before
+// consulting MayPromoteToRunning. That guard is shared with the run-start
+// path on purpose (see the comment on promotableStatuses): both writers
+// refuse to touch done (the merge trigger), in_review (a pending human
+// decision), and cancelled (terminal) - a task failing after its PR already
+// merged must not drag a done card back to blocked, which is exactly the
+// scenario the runner used to handle with a PRAlreadyMerged file overlay.
+// Writes via UpdateIssueStatusAndUnassign, not UpdateIssueStatus: a blocked
+// card needs a human to pick it back up, so its stale assignee is cleared
+// rather than left pointing at an agent that is done trying.
+func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, failureReason string) {
+	current, err := s.Queries.GetIssue(ctx, issue.ID)
+	if err != nil {
+		slog.Error("lifecycle: reload issue for blocked status", "err", err, "issue_id", util.UUIDToString(issue.ID), "failure_reason", failureReason)
+		return
+	}
+	if !MayPromoteToRunning(current.Status) {
+		return
+	}
+	prevStatus := current.Status
+	updated, err := s.Queries.UpdateIssueStatusAndUnassign(ctx, db.UpdateIssueStatusAndUnassignParams{
+		ID:          current.ID,
+		Status:      StatusBlocked,
+		WorkspaceID: current.WorkspaceID,
+	})
+	if err != nil {
+		slog.Error("lifecycle: write blocked status", "err", err, "issue_id", util.UUIDToString(issue.ID), "failure_reason", failureReason)
+		return
+	}
+	s.broadcastIssueUpdated(updated, prevStatus)
+}

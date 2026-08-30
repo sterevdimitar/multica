@@ -3126,6 +3126,22 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 			s.notifyQuickCreateFailed(ctx, task, qc, errMsg)
 		}
 	}
+
+	// Park the card at blocked so a human can investigate - but only when this
+	// failure is final. When an auto-retry is pending (retried != nil) the
+	// issue stays exactly where the original dispatch left it (in_progress)
+	// and the retry's own dispatch re-promotes it if needed; parking it at
+	// blocked here would be the same "spam on every daemon hiccup" mistake
+	// the comment/chat-message/quick-create guards above already avoid, except
+	// visible on the board instead of in the issue feed.
+	if task.IssueID.Valid && retried == nil {
+		if issue, err := s.Queries.GetIssue(ctx, task.IssueID); err != nil {
+			slog.Error("fail task: load issue for blocked status", "err", err, "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
+		} else {
+			s.MarkIssueBlocked(ctx, issue, failureReason)
+		}
+	}
+
 	// Reconcile agent status
 	s.ReconcileAgentStatus(ctx, task.AgentID)
 

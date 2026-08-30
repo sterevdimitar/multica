@@ -360,3 +360,267 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 		t.Fatalf("issue status = %q, want unchanged %q since the write genuinely failed", issueStatus, StatusTodo)
 	}
 }
+
+// failTaskFixture provisions a workspace/user/agent/runtime/issue quintet for
+// FailTask/MarkIssueBlocked tests. The issue starts at the given status and
+// is assigned to the fixture's own agent (FailTask's blocked path is only
+// interesting when there is an assignee to clear). Returns the issue row and
+// a task-creation helper bound to this fixture's agent/runtime.
+func failTaskFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, startStatus string) (db.Issue, func(taskStatus string, extra ...func(*failTaskParams)) string) {
+	t.Helper()
+	suffix := time.Now().UnixNano()
+	queries := db.New(pool)
+
+	var userID string
+	if err := pool.QueryRow(ctx, `INSERT INTO "user" (name, email) VALUES ($1,$2) RETURNING id`,
+		"Fail Task Test", fmt.Sprintf("fail-task-%d@multica.ai", suffix)).Scan(&userID); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	var workspaceID string
+	if err := pool.QueryRow(ctx, `INSERT INTO workspace (name, slug, description, issue_prefix) VALUES ($1,$2,$3,$4) RETURNING id`,
+		"Fail Task Test", fmt.Sprintf("fail-task-%d", suffix), "temp fail-task test", "FTT").Scan(&workspaceID); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO member (workspace_id, user_id, role) VALUES ($1,$2,'owner')`, workspaceID, userID); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	var runtimeID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, visibility, owner_id)
+		VALUES ($1, 'daemon-ftt', 'FTT RT', 'cloud', 'ftt_provider', 'online', 'x', '{}'::jsonb, now(), 'private', $2)
+		RETURNING id`, workspaceID, userID).Scan(&runtimeID); err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	var agentID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agent (workspace_id, name, description, runtime_mode, runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id)
+		VALUES ($1, $2, '', 'cloud', '{}'::jsonb, $3, 'private', 5, $4)
+		RETURNING id`, workspaceID, fmt.Sprintf("FTT Agent %d", suffix), runtimeID, userID).Scan(&agentID); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	var issueID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position, assignee_type, assignee_id)
+		VALUES ($1, 'ftt issue', $2, 'none', $3, 'member', 700004, 0, 'agent', $4)
+		RETURNING id`, workspaceID, startStatus, userID, agentID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	t.Cleanup(func() {
+		c := context.Background()
+		pool.Exec(c, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+		pool.Exec(c, `DELETE FROM issue WHERE id = $1`, issueID)
+		pool.Exec(c, `DELETE FROM agent WHERE id = $1`, agentID)
+		pool.Exec(c, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+		pool.Exec(c, `DELETE FROM member WHERE workspace_id = $1 AND user_id = $2`, workspaceID, userID)
+		pool.Exec(c, `DELETE FROM workspace WHERE id = $1`, workspaceID)
+		pool.Exec(c, `DELETE FROM "user" WHERE id = $1`, userID)
+	})
+
+	issue, err := queries.GetIssue(ctx, util.MustParseUUID(issueID))
+	if err != nil {
+		t.Fatalf("load fixture issue: %v", err)
+	}
+
+	createTask := func(taskStatus string, extra ...func(*failTaskParams)) string {
+		p := failTaskParams{attempt: 1, maxAttempts: 2}
+		for _, fn := range extra {
+			fn(&p)
+		}
+		var taskID string
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context, attempt, max_attempts)
+			VALUES ($1, $2, $3, $4, 0, '{}'::jsonb, $5, $6)
+			RETURNING id`, agentID, runtimeID, issueID, taskStatus, p.attempt, p.maxAttempts).Scan(&taskID); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		t.Cleanup(func() {
+			pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+		})
+		return taskID
+	}
+
+	return issue, createTask
+}
+
+// failTaskParams tunes the task row created by failTaskFixture's createTask
+// helper for the small number of tests that need a non-default attempt.
+type failTaskParams struct {
+	attempt     int32
+	maxAttempts int32
+}
+
+func withAttempt(attempt, maxAttempts int32) func(*failTaskParams) {
+	return func(p *failTaskParams) {
+		p.attempt = attempt
+		p.maxAttempts = maxAttempts
+	}
+}
+
+func TestFailTaskBlocksTheIssue(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
+	taskID := createTask("running")
+
+	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if status != StatusBlocked {
+		t.Fatalf("issue status = %q, want %q", status, StatusBlocked)
+	}
+}
+
+func TestFailTaskClearsBothAssigneeFields(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
+	if !issue.AssigneeID.Valid {
+		t.Fatal("fixture issue expected to start assigned")
+	}
+	taskID := createTask("running")
+
+	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	var assigneeType pgtype.Text
+	var assigneeID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT assignee_type, assignee_id FROM issue WHERE id = $1`, issue.ID).
+		Scan(&assigneeType, &assigneeID); err != nil {
+		t.Fatalf("read issue assignee: %v", err)
+	}
+	if assigneeType.Valid || assigneeID.Valid {
+		t.Fatalf("assignee_type=%v assignee_id=%v, want both NULL", assigneeType, assigneeID)
+	}
+}
+
+func TestFailTaskLeavesDoneAlone(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, createTask := failTaskFixture(t, ctx, pool, StatusDone)
+	taskID := createTask("running")
+
+	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if status != StatusDone {
+		t.Fatalf("issue status = %q, want unchanged %q", status, StatusDone)
+	}
+}
+
+// TestFailTaskStillFailsTheTaskWhenTheIssueWriteFails proves MarkIssueBlocked
+// is best-effort in FailTask: forcing the real UPDATE issue SET status = ...
+// statement to fail must not prevent the task row from reaching 'failed'.
+// Same mechanism as TestDispatchProceedsWhenTheStatusWriteFails - a row-scoped
+// trigger, not a disabled constraint.
+func TestFailTaskStillFailsTheTaskWhenTheIssueWriteFails(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
+	taskID := createTask("running")
+
+	suffix := time.Now().UnixNano()
+	triggerName := fmt.Sprintf("fail_task_status_fail_%d", suffix)
+	functionName := triggerName + "_fn"
+	issueIDStr := util.UUIDToString(issue.ID)
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION %s()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $$
+		BEGIN
+			RAISE EXCEPTION 'fail_task: forced status write failure';
+		END;
+		$$;
+	`, quoteIdent(functionName))); err != nil {
+		t.Fatalf("create status-fail trigger function: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", quoteIdent(functionName)))
+	})
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE UPDATE OF status ON issue
+		FOR EACH ROW
+		WHEN (NEW.id = %s::uuid)
+		EXECUTE FUNCTION %s();
+	`, quoteIdent(triggerName), quoteLiteral(issueIDStr), quoteIdent(functionName))); err != nil {
+		t.Fatalf("create status-fail trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON issue", quoteIdent(triggerName)))
+	})
+
+	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	var taskStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&taskStatus); err != nil {
+		t.Fatalf("read task status: %v", err)
+	}
+	if taskStatus != "failed" {
+		t.Fatalf("task status = %q, want failed despite the issue status-write failure", taskStatus)
+	}
+
+	var issueStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&issueStatus); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if issueStatus != StatusInProgress {
+		t.Fatalf("issue status = %q, want unchanged %q since the write genuinely failed", issueStatus, StatusInProgress)
+	}
+}
+
+// TestFailTaskDoesNotBlockWhenAutoRetryIsPending proves the auto-retry gate on
+// MarkIssueBlocked: a failure whose reason is retryable and has remaining
+// attempt budget must leave the issue exactly where it was (in_progress) and
+// create a retry child, not park the card at blocked. See retryableReasons
+// and retryEligible in task.go.
+func TestFailTaskDoesNotBlockWhenAutoRetryIsPending(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
+	taskID := createTask("running", withAttempt(1, 2))
+
+	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "timeout"); err != nil {
+		t.Fatalf("FailTask: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if status != StatusInProgress {
+		t.Fatalf("issue status = %q, want unchanged %q while a retry is pending", status, StatusInProgress)
+	}
+
+	var retryCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND id != $2`, issue.ID, taskID).Scan(&retryCount); err != nil {
+		t.Fatalf("count retry tasks: %v", err)
+	}
+	if retryCount != 1 {
+		t.Fatalf("retry task count = %d, want 1", retryCount)
+	}
+}
