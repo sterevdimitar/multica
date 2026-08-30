@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -144,7 +147,21 @@ func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agen
 // UpdateIssueStatusAndUnassign, not UpdateIssueStatus: a blocked card needs a
 // human to pick it back up, so its stale assignee is cleared rather than left
 // pointing at an agent that is done trying.
-func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, failureReason string) {
+//
+// Once the status write succeeds, this also posts one comment naming
+// failureReason and how to resume the card. agentID authors that comment as
+// the agent whose task failed (comment.author_id is NOT NULL, so a synthetic
+// "system" author isn't an option here). The comment MUST be posted after
+// the status write's assignee-clear has taken effect, never before:
+// createAgentComment's every caller posts a comment that may mention nobody,
+// and shouldEnqueueOnComment/isAgentAssigneeReady wakes the card's assignee
+// on exactly that shape - a still-assigned card getting a comment here would
+// risk the runaway-dispatch bug fixed by clearing the assignee first (see
+// UpdateIssueStatusAndUnassign above). Status and assignee move together in
+// that one statement, so "after the write succeeds" already satisfies the
+// ordering; the DB test for this asserts the ordering directly rather than
+// trusting it.
+func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agentID pgtype.UUID, failureReason string) {
 	current, err := s.Queries.GetIssue(ctx, issue.ID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -172,4 +189,27 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, fail
 		return
 	}
 	s.broadcastIssueUpdated(updated, prevStatus)
+	s.createAgentComment(ctx, current.ID, agentID, blockedReasonCommentBody(failureReason), "system", pgtype.UUID{}, pgtype.UUID{})
+}
+
+// blockedReasonCommentBody renders the comment MarkIssueBlocked posts after
+// parking a card. It always starts with "Classified as" - never with
+// failureReason itself - so an attacker-controlled or future reason string
+// that happened to start with "/" can never be parsed as a pipeline control
+// verb (pipeline comments are member-authored; a leading "/" is a command).
+// It never embeds a mention:// link, describing the @-mention mechanism in
+// prose instead, so this comment can never itself dispatch an agent onto the
+// card it just blocked - and failureReason is defused before interpolation
+// so a reason string that itself contains the literal substring "mention://"
+// (classifier bug, future free-text reason, etc.) can't smuggle one in
+// either. It deliberately omits the raw error text: FailTask already posts
+// that in a separate system comment on the same condition, and this one is
+// meant to carry only what that one doesn't - the classified reason and how
+// to resume.
+func blockedReasonCommentBody(failureReason string) string {
+	safeReason := strings.ReplaceAll(failureReason, "mention://", "mention-blocked://")
+	return fmt.Sprintf(
+		"Classified as `%s`.\n\n@-mention an agent on this card to resume - the run reassigns and the card returns to in-progress.",
+		safeReason,
+	)
 }

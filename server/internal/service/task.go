@@ -3140,7 +3140,7 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 				slog.Error("fail task: load issue for blocked status", "error", err, "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 			}
 		} else {
-			s.MarkIssueBlocked(ctx, issue, failureReason)
+			s.MarkIssueBlocked(ctx, issue, task.AgentID, failureReason)
 		}
 	}
 

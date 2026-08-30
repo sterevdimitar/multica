@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +180,167 @@ func installStatusFailTrigger(t *testing.T, ctx context.Context, pool *pgxpool.P
 		EXECUTE FUNCTION %s();
 	`, quoteIdent(triggerName), quoteLiteral(issueID), quoteIdent(functionName))); err != nil {
 		t.Fatalf("create status-fail trigger: %v", err)
+	}
+}
+
+// installCommentBeforeAssigneeClearTrigger makes an INSERT into comment fail
+// for the given issue if, at the moment of insert, the issue still has a
+// non-NULL assignee_id. It exists to prove MarkIssueBlocked's comment lands
+// strictly after the status-write's assignee-clear, not merely that both are
+// true by the time the test looks at end state - if the comment insert were
+// ever moved ahead of the unassign, this trigger fires and the insert (and
+// so the test) fails. Same shape as installStatusFailTrigger: fixed names,
+// DROP ... IF EXISTS before CREATE, a row-scoped WHEN clause, drops
+// registered in t.Cleanup.
+func installCommentBeforeAssigneeClearTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, issueID string) {
+	t.Helper()
+	triggerName := "lifecycle_comment_assignee_" + name
+	functionName := triggerName + "_fn"
+
+	drop := func() {
+		pool.Exec(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON comment", quoteIdent(triggerName)))
+		pool.Exec(context.Background(), fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", quoteIdent(functionName)))
+	}
+	drop()
+	t.Cleanup(drop)
+
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION %s()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $$
+		DECLARE
+			still_assigned uuid;
+		BEGIN
+			SELECT assignee_id INTO still_assigned FROM issue WHERE id = NEW.issue_id;
+			IF still_assigned IS NOT NULL THEN
+				RAISE EXCEPTION 'lifecycle_comment_assignee: comment inserted before assignee was cleared';
+			END IF;
+			RETURN NEW;
+		END;
+		$$;
+	`, quoteIdent(functionName))); err != nil {
+		t.Fatalf("create comment-before-unassign trigger function: %v", err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE INSERT ON comment
+		FOR EACH ROW
+		WHEN (NEW.issue_id = %s::uuid)
+		EXECUTE FUNCTION %s();
+	`, quoteIdent(triggerName), quoteLiteral(issueID), quoteIdent(functionName))); err != nil {
+		t.Fatalf("create comment-before-unassign trigger: %v", err)
+	}
+}
+
+// countCommentsForIssue returns the number of comment rows for issueID whose
+// content contains substr ("" matches every comment). Used instead of a bare
+// count(*) where a test needs to isolate MarkIssueBlocked's own comment from
+// FailTask's separate error comment on the same issue.
+func countCommentsForIssue(t *testing.T, ctx context.Context, pool *pgxpool.Pool, issueID, substr string) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content LIKE '%' || $2 || '%'`, issueID, substr).Scan(&count); err != nil {
+		t.Fatalf("count comments: %v", err)
+	}
+	return count
+}
+
+func TestBlockedCommentNamesTheReason(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, agentID, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MBC", number: 700010, assign: true}, StatusInProgress)
+
+	svc.MarkIssueBlocked(ctx, issue, util.MustParseUUID(agentID), "config-drift")
+
+	if got := countCommentsForIssue(t, ctx, pool, util.UUIDToString(issue.ID), "config-drift"); got != 1 {
+		t.Fatalf("comments mentioning config-drift = %d, want 1", got)
+	}
+}
+
+func TestBlockedCommentIsPostedAfterTheAssigneeIsCleared(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, agentID, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MBC", number: 700011, assign: true}, StatusInProgress)
+	issueID := util.UUIDToString(issue.ID)
+	if !issue.AssigneeID.Valid {
+		t.Fatal("fixture issue expected to start assigned")
+	}
+
+	installCommentBeforeAssigneeClearTrigger(t, ctx, pool, "ordering", issueID)
+
+	svc.MarkIssueBlocked(ctx, issue, util.MustParseUUID(agentID), "config-drift")
+
+	// If the comment insert had raced ahead of the assignee-clear, the
+	// trigger above would have raised and createAgentComment's swallowed
+	// error would leave zero comments behind. Its presence here proves the
+	// insert happened - and thus ran - only once the issue's assignee_id
+	// was already NULL.
+	if got := countCommentsForIssue(t, ctx, pool, issueID, ""); got != 1 {
+		t.Fatalf("comment count = %d, want 1 (comment must be posted only after the assignee is cleared)", got)
+	}
+
+	var assigneeID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT assignee_id FROM issue WHERE id = $1`, issueID).Scan(&assigneeID); err != nil {
+		t.Fatalf("read issue assignee: %v", err)
+	}
+	if assigneeID.Valid {
+		t.Fatalf("assignee_id still set after MarkIssueBlocked")
+	}
+}
+
+func TestBlockedCommentNeverStartsWithSlash(t *testing.T) {
+	reasons := []string{"config-drift", "gha-workflow-failure", "/etc/passwd-shaped-reason", ""}
+	for _, reason := range reasons {
+		t.Run(reason, func(t *testing.T) {
+			body := blockedReasonCommentBody(reason)
+			if body == "" {
+				t.Fatal("comment body must not be empty")
+			}
+			if body[0] == '/' {
+				t.Fatalf("comment body must never start with '/', got %q", body)
+			}
+		})
+	}
+}
+
+func TestBlockedCommentCarriesNoMentionLink(t *testing.T) {
+	reasons := []string{"config-drift", "gha-workflow-failure", "mention://agent/00000000-0000-0000-0000-000000000000"}
+	for _, reason := range reasons {
+		t.Run(reason, func(t *testing.T) {
+			body := blockedReasonCommentBody(reason)
+			if strings.Contains(body, "mention://") {
+				t.Fatalf("comment body must never contain a mention:// link, got %q", body)
+			}
+		})
+	}
+}
+
+// TestNoCommentWhenTheStatusWriteFailed proves MarkIssueBlocked posts nothing
+// when the status write it depends on fails: a reason comment on a card that
+// never moved would describe a state that doesn't exist. Calls
+// MarkIssueBlocked directly (rather than through FailTask) so the only
+// comment in play is the one this function might post - FailTask posts its
+// own separate error comment on the same condition, which would otherwise
+// have to be filtered out of the count.
+func TestNoCommentWhenTheStatusWriteFailed(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, agentID, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MBC", number: 700012, assign: true}, StatusInProgress)
+	issueID := util.UUIDToString(issue.ID)
+
+	installStatusFailTrigger(t, ctx, pool, "blockedcomment", issueID)
+
+	svc.MarkIssueBlocked(ctx, issue, util.MustParseUUID(agentID), "config-drift")
+
+	if got := countCommentsForIssue(t, ctx, pool, issueID, ""); got != 0 {
+		t.Fatalf("comment count = %d, want 0 when the status write failed", got)
 	}
 }
 
