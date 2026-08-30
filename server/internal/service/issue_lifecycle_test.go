@@ -44,6 +44,20 @@ func TestRunStartStatusOnlyReturnsSchemaStatuses(t *testing.T) {
 			}
 		})
 	}
+
+	// The agent list above can only cover agents that exist today. The table
+	// itself is the thing that drifts: adding a per-phase status like
+	// "reviewing" to runStartStatusByAgent without first migrating the CHECK
+	// constraint would make every dispatch for that agent fail its status
+	// write. Iterating the table catches that whatever the agent is called.
+	for agent, status := range runStartStatusByAgent {
+		t.Run("table/"+agent, func(t *testing.T) {
+			if !schemaStatuses[status] {
+				t.Errorf("runStartStatusByAgent[%q] = %q, not a valid schema status; "+
+					"a per-phase status needs a CHECK-constraint migration first", agent, status)
+			}
+		})
+	}
 }
 
 func TestMayPromoteToRunning(t *testing.T) {

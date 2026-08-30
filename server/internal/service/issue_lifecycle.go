@@ -8,7 +8,7 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// Issue status constants, mirroring the CHECK constraint on issues.status
+// Issue status constants, mirroring the CHECK constraint on issue.status
 // (server/migrations/001_init.up.sql:58):
 //
 //	CHECK (status IN ('backlog', 'todo', 'in_progress', 'in_review', 'done',
@@ -42,12 +42,19 @@ func RunStartStatus(agentName string) string {
 	return StatusInProgress
 }
 
-// mayPromoteToRunning is the allow-list of statuses a starting run may move a
-// card out of. Terminal statuses (done, cancelled) and the human-decision
-// status (in_review) are deliberately excluded: a dispatch arriving while one
-// of those holds must never overwrite it. Any status not in this list -
-// including one added by a future migration - is refused by default.
-var mayPromoteToRunning = map[string]bool{
+// promotableStatuses is the allow-list of statuses a starting run may write
+// StatusInProgress over. Terminal statuses (done, cancelled) and the
+// human-decision status (in_review) are deliberately excluded: a dispatch
+// arriving while one of those holds must never overwrite it. Any status not in
+// this list - including one added by a future migration - is refused by
+// default.
+//
+// StatusInProgress is in the list on purpose, and must stay. A card can be
+// dispatched to while already running - a second run against the same card, or
+// a retry - and that has to be a no-op rather than a refusal. Removing this
+// entry would not break any caller loudly; it would just make the promotion
+// path return early for every card after the first dispatch.
+var promotableStatuses = map[string]bool{
 	StatusBacklog:    true,
 	StatusTodo:       true,
 	StatusBlocked:    true,
@@ -58,7 +65,7 @@ var mayPromoteToRunning = map[string]bool{
 // by a starting run. True for backlog, todo, blocked, in_progress; false for
 // in_review, done, cancelled and any unrecognised value.
 func MayPromoteToRunning(currentStatus string) bool {
-	return mayPromoteToRunning[currentStatus]
+	return promotableStatuses[currentStatus]
 }
 
 // MarkIssueRunning writes the starting status for a dispatched task's issue.
