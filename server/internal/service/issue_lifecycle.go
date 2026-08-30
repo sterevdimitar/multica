@@ -1,5 +1,13 @@
 package service
 
+import (
+	"context"
+	"log/slog"
+
+	"github.com/multica-ai/multica/server/internal/util"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
+)
+
 // Issue status constants, mirroring the CHECK constraint on issues.status
 // (server/migrations/001_init.up.sql:58):
 //
@@ -51,4 +59,37 @@ var mayPromoteToRunning = map[string]bool{
 // in_review, done, cancelled and any unrecognised value.
 func MayPromoteToRunning(currentStatus string) bool {
 	return mayPromoteToRunning[currentStatus]
+}
+
+// MarkIssueRunning writes the starting status for a dispatched task's issue.
+// Best-effort: every failure is logged and swallowed. Never returns an error,
+// because no caller may change dispatch behaviour on its result.
+//
+// The passed issue may be stale (fetched earlier in the caller's request), so
+// this re-reads the issue's current status before consulting
+// MayPromoteToRunning — the guard protects a merge trigger (done) and a
+// pending human decision (in_review), and trusting a stale struct could let a
+// dispatch clobber either. Writes via UpdateIssueStatus (not the unassign
+// variant): a running card keeps its assignee, since the chain wakes the next
+// agent through it.
+func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agentName string) {
+	current, err := s.Queries.GetIssue(ctx, issue.ID)
+	if err != nil {
+		slog.Error("lifecycle: reload issue for run-start status", "err", err, "issue_id", util.UUIDToString(issue.ID))
+		return
+	}
+	if !MayPromoteToRunning(current.Status) {
+		return
+	}
+	prevStatus := current.Status
+	updated, err := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
+		ID:          current.ID,
+		Status:      RunStartStatus(agentName),
+		WorkspaceID: current.WorkspaceID,
+	})
+	if err != nil {
+		slog.Error("lifecycle: write run-start status", "err", err, "issue_id", util.UUIDToString(issue.ID))
+		return
+	}
+	s.broadcastIssueUpdated(updated, prevStatus)
 }

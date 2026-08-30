@@ -273,6 +273,18 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 		return
 	}
 
+	// Move the card off todo/blocked the moment the run actually starts, so
+	// the board reflects work in progress instead of waiting for completion.
+	// Best-effort: MarkIssueRunning never errors, and dispatch has already
+	// happened above regardless of what it does.
+	if dispatched.IssueID.Valid {
+		if issue, err := s.Queries.GetIssue(ctx, dispatched.IssueID); err != nil {
+			slog.Error("webhook: load issue for run-start status", "err", err, "task_id", taskID)
+		} else {
+			s.MarkIssueRunning(ctx, issue, agent.Name)
+		}
+	}
+
 	// Record the delivery receipt so completion reconciliation
 	// (reconcileCommentsOnCompletion) skips the comments this dispatch conveyed —
 	// most importantly the task's own trigger comment. The daemon claim path
