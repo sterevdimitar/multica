@@ -273,13 +273,14 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 		return
 	}
 
-	// Move the card off todo/blocked the moment the run actually starts, so
-	// the board reflects work in progress instead of waiting for completion.
-	// Best-effort: MarkIssueRunning never errors, and dispatch has already
-	// happened above regardless of what it does.
+	// Move the card off its promotable statuses (see promotableStatuses) the
+	// moment the run actually starts, so the board reflects work in progress
+	// instead of waiting for completion. Best-effort: MarkIssueRunning never
+	// errors, and dispatch has already happened above regardless of what it
+	// does.
 	if dispatched.IssueID.Valid {
 		if issue, err := s.Queries.GetIssue(ctx, dispatched.IssueID); err != nil {
-			slog.Error("webhook: load issue for run-start status", "err", err, "task_id", taskID)
+			slog.Error("webhook: load issue for run-start status", "err", err, "task_id", taskID, "issue_id", util.UUIDToString(dispatched.IssueID))
 		} else {
 			// MarkIssueRunning re-reads this same issue by ID before acting on
 			// it. That is deliberate, not a redundant round-trip to delete: the

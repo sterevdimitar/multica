@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -49,11 +51,21 @@ func RunStartStatus(agentName string) string {
 // this list - including one added by a future migration - is refused by
 // default.
 //
+// Both writers that consult MayPromoteToRunning - MarkIssueRunning (starting a
+// run) and MarkIssueBlocked (parking a failed one) - share this exact list and
+// refuse the same three statuses (in_review, done, cancelled) for the same
+// reasons: a pending human decision, a merge trigger, and a terminal state
+// must not be touched by either writer, even though their motivations for
+// checking are opposite (promoting vs. parking).
+//
 // StatusInProgress is in the list on purpose, and must stay. A card can be
 // dispatched to while already running - a second run against the same card, or
-// a retry - and that has to be a no-op rather than a refusal. Removing this
-// entry would not break any caller loudly; it would just make the promotion
-// path return early for every card after the first dispatch.
+// a retry - and that has to be a permitted write rather than a refusal (it is
+// a real write: it bumps updated_at and broadcasts issue:updated with
+// status_changed: false, not a no-op). Removing this entry would not break any
+// caller loudly; it would just make the promotion path return early for every
+// card after the first dispatch. The same applies to MarkIssueBlocked
+// re-blocking an already-blocked card.
 var promotableStatuses = map[string]bool{
 	StatusBacklog:    true,
 	StatusTodo:       true,
@@ -61,41 +73,53 @@ var promotableStatuses = map[string]bool{
 	StatusInProgress: true,
 }
 
-// MayPromoteToRunning reports whether a card at the given status may be moved
-// by a starting run. True for backlog, todo, blocked, in_progress; false for
-// in_review, done, cancelled and any unrecognised value.
+// MayPromoteToRunning reports whether a card at the given status may be
+// touched by either lifecycle writer - a starting run promoting it to running,
+// or a failed run parking it as blocked. True for backlog, todo, blocked,
+// in_progress; false for in_review, done, cancelled and any unrecognised
+// value. See promotableStatuses for why the list is shared.
 func MayPromoteToRunning(currentStatus string) bool {
 	return promotableStatuses[currentStatus]
 }
 
 // MarkIssueRunning writes the starting status for a dispatched task's issue.
-// Best-effort: every failure is logged and swallowed. Never returns an error,
-// because no caller may change dispatch behaviour on its result.
+// Best-effort: every write failure is logged and swallowed, and a refusal by
+// the guard below is logged too (at Info, since it is an expected outcome,
+// not a failure). Never returns an error, because no caller may change
+// dispatch behaviour on its result.
 //
 // The passed issue may be stale (fetched earlier in the caller's request), so
 // this re-reads the issue's current status before consulting
-// MayPromoteToRunning — the guard protects a merge trigger (done) and a
-// pending human decision (in_review), and trusting a stale struct could let a
-// dispatch clobber either. Writes via UpdateIssueStatus (not the unassign
-// variant): a running card keeps its assignee, since the chain wakes the next
-// agent through it.
+// MayPromoteToRunning - see promotableStatuses for why the guard exists and
+// why it is shared with MarkIssueBlocked. Writes via UpdateIssueStatus (not
+// the unassign variant): a running card keeps its assignee, since the chain
+// wakes the next agent through it.
 func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agentName string) {
 	current, err := s.Queries.GetIssue(ctx, issue.ID)
 	if err != nil {
-		slog.Error("lifecycle: reload issue for run-start status", "err", err, "issue_id", util.UUIDToString(issue.ID))
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("lifecycle: reload issue for run-start status", "err", err, "issue_id", util.UUIDToString(issue.ID))
+		}
 		return
 	}
 	if !MayPromoteToRunning(current.Status) {
+		slog.Info("lifecycle: run-start status refused", "issue_id", util.UUIDToString(current.ID), "current_status", current.Status)
 		return
 	}
 	prevStatus := current.Status
+	newStatus := RunStartStatus(agentName)
 	updated, err := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
 		ID:          current.ID,
-		Status:      RunStartStatus(agentName),
+		Status:      newStatus,
 		WorkspaceID: current.WorkspaceID,
 	})
 	if err != nil {
-		slog.Error("lifecycle: write run-start status", "err", err, "issue_id", util.UUIDToString(issue.ID))
+		slog.Error("lifecycle: write run-start status", "err", err,
+			"issue_id", util.UUIDToString(current.ID),
+			"workspace_id", util.UUIDToString(current.WorkspaceID),
+			"current_status", prevStatus,
+			"new_status", newStatus,
+			"agent_name", agentName)
 		return
 	}
 	s.broadcastIssueUpdated(updated, prevStatus)
@@ -103,27 +127,33 @@ func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agen
 
 // MarkIssueBlocked parks a card whose task failed, so a human can investigate.
 // Clears the assignee in the same statement as the status write. Best-effort,
-// same rationale as MarkIssueRunning: every failure is logged and swallowed,
-// and this never returns an error because no caller may change fail-task
-// behaviour on its result.
+// same rationale as MarkIssueRunning: every write failure is logged and
+// swallowed, a guard refusal is logged too (at Info - for this writer it is
+// often the routine, designed-for outcome, e.g. a task failing after its PR
+// already merged (done) or after a human moved the card to in_review), and
+// this never returns an error because no caller may change fail-task
+// behaviour on its result. failureReason is log context only; it is never
+// written to the card.
 //
 // The passed issue may be stale, so this re-reads its current status before
-// consulting MayPromoteToRunning. That guard is shared with the run-start
-// path on purpose (see the comment on promotableStatuses): both writers
-// refuse to touch done (the merge trigger), in_review (a pending human
-// decision), and cancelled (terminal) - a task failing after its PR already
-// merged must not drag a done card back to blocked, which is exactly the
-// scenario the runner used to handle with a PRAlreadyMerged file overlay.
-// Writes via UpdateIssueStatusAndUnassign, not UpdateIssueStatus: a blocked
-// card needs a human to pick it back up, so its stale assignee is cleared
-// rather than left pointing at an agent that is done trying.
+// consulting MayPromoteToRunning - see promotableStatuses for why the guard
+// exists and why it is shared with MarkIssueRunning (that shared guard is
+// what stops a task failing after its PR already merged from dragging a done
+// card back to blocked, which is exactly the scenario the runner used to
+// handle with a PRAlreadyMerged file overlay). Writes via
+// UpdateIssueStatusAndUnassign, not UpdateIssueStatus: a blocked card needs a
+// human to pick it back up, so its stale assignee is cleared rather than left
+// pointing at an agent that is done trying.
 func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, failureReason string) {
 	current, err := s.Queries.GetIssue(ctx, issue.ID)
 	if err != nil {
-		slog.Error("lifecycle: reload issue for blocked status", "err", err, "issue_id", util.UUIDToString(issue.ID), "failure_reason", failureReason)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("lifecycle: reload issue for blocked status", "err", err, "issue_id", util.UUIDToString(issue.ID), "failure_reason", failureReason)
+		}
 		return
 	}
 	if !MayPromoteToRunning(current.Status) {
+		slog.Info("lifecycle: blocked status refused", "issue_id", util.UUIDToString(current.ID), "current_status", current.Status)
 		return
 	}
 	prevStatus := current.Status
@@ -133,7 +163,12 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, fail
 		WorkspaceID: current.WorkspaceID,
 	})
 	if err != nil {
-		slog.Error("lifecycle: write blocked status", "err", err, "issue_id", util.UUIDToString(issue.ID), "failure_reason", failureReason)
+		slog.Error("lifecycle: write blocked status", "err", err,
+			"issue_id", util.UUIDToString(current.ID),
+			"workspace_id", util.UUIDToString(current.WorkspaceID),
+			"current_status", prevStatus,
+			"new_status", StatusBlocked,
+			"failure_reason", failureReason)
 		return
 	}
 	s.broadcastIssueUpdated(updated, prevStatus)

@@ -11,39 +11,67 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
-// markRunningFixture provisions a workspace/user/agent/issue trio for
-// MarkIssueRunning tests, with the issue at the given starting status and
-// (optionally) assigned to the fixture's own agent. Returns the created
-// issue row and the agent name to pass to MarkIssueRunning.
-func markRunningFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, startStatus string, assign bool) (db.Issue, string) {
+// lifecycleFixtureOpts configures newLifecycleFixture. prefix seeds the
+// user/workspace/agent names, slug and issue number so concurrent tests never
+// collide; assign controls whether the issue starts with an assignee;
+// webhook selects the runtime mode (webhook-mode runtimes additionally get
+// webhook_url/webhook_secret/webhook_event_type, which the dispatch test
+// needs to actually deliver).
+type lifecycleFixtureOpts struct {
+	prefix  string
+	number  int32
+	assign  bool
+	webhook bool
+}
+
+// newLifecycleFixture provisions a workspace/user/agent/runtime/issue set
+// shared by the MarkIssueRunning, FailTask/MarkIssueBlocked and webhook
+// dispatch DB tests. It differs from test to test only in the issue's
+// starting status, whether it starts assigned, and whether the runtime is
+// cloud- or webhook-mode - everything else (DDL, column lists, cleanup) was
+// previously duplicated three times and is now written once. Returns the
+// loaded issue row plus the agent name/id and runtime id, so callers that
+// need to create their own task rows (webhook dispatch) or use the shared
+// createLifecycleTask helper (FailTask) both have what they need.
+func newLifecycleFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, opts lifecycleFixtureOpts, startStatus string) (issue db.Issue, agentName, agentID, runtimeID string) {
 	t.Helper()
 	suffix := time.Now().UnixNano()
 	queries := db.New(pool)
 
 	var userID string
 	if err := pool.QueryRow(ctx, `INSERT INTO "user" (name, email) VALUES ($1,$2) RETURNING id`,
-		"Mark Running Test", fmt.Sprintf("mark-running-%d@multica.ai", suffix)).Scan(&userID); err != nil {
+		opts.prefix+" Test", fmt.Sprintf("%s-%d@multica.ai", opts.prefix, suffix)).Scan(&userID); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	var workspaceID string
 	if err := pool.QueryRow(ctx, `INSERT INTO workspace (name, slug, description, issue_prefix) VALUES ($1,$2,$3,$4) RETURNING id`,
-		"Mark Running Test", fmt.Sprintf("mark-running-%d", suffix), "temp mark-running test", "MRT").Scan(&workspaceID); err != nil {
+		opts.prefix+" Test", fmt.Sprintf("%s-%d", opts.prefix, suffix), "temp "+opts.prefix+" test", opts.prefix).Scan(&workspaceID); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO member (workspace_id, user_id, role) VALUES ($1,$2,'owner')`, workspaceID, userID); err != nil {
 		t.Fatalf("create member: %v", err)
 	}
-	var runtimeID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, visibility, owner_id)
-		VALUES ($1, 'daemon-mrt', 'MRT RT', 'cloud', 'mrt_provider', 'online', 'x', '{}'::jsonb, now(), 'private', $2)
-		RETURNING id`, workspaceID, userID).Scan(&runtimeID); err != nil {
-		t.Fatalf("create runtime: %v", err)
+
+	if opts.webhook {
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, visibility, owner_id, webhook_url, webhook_secret, webhook_event_type)
+			VALUES ($1, $2, $3, 'webhook', $4, 'online', 'x', '{}'::jsonb, now(), 'private', $5, 'http://127.0.0.1:1/unreachable', $6, 'task.dispatched')
+			RETURNING id`, workspaceID, "daemon-"+opts.prefix, opts.prefix+" RT", opts.prefix+"_provider", userID, opts.prefix+"-secret").Scan(&runtimeID); err != nil {
+			t.Fatalf("create runtime: %v", err)
+		}
+	} else {
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, visibility, owner_id)
+			VALUES ($1, $2, $3, 'cloud', $4, 'online', 'x', '{}'::jsonb, now(), 'private', $5)
+			RETURNING id`, workspaceID, "daemon-"+opts.prefix, opts.prefix+" RT", opts.prefix+"_provider", userID).Scan(&runtimeID); err != nil {
+			t.Fatalf("create runtime: %v", err)
+		}
 	}
-	agentName := fmt.Sprintf("MRT Agent %d", suffix)
-	var agentID string
+
+	agentName = fmt.Sprintf("%s Agent %d", opts.prefix, suffix)
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO agent (workspace_id, name, description, runtime_mode, runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id)
 		VALUES ($1, $2, '', 'cloud', '{}'::jsonb, $3, 'private', 5, $4)
@@ -52,24 +80,25 @@ func markRunningFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s
 	}
 
 	var issueID string
-	if assign {
+	if opts.assign {
 		if err := pool.QueryRow(ctx, `
 			INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position, assignee_type, assignee_id)
-			VALUES ($1, 'mrt issue', $2, 'none', $3, 'member', 700001, 0, 'agent', $4)
-			RETURNING id`, workspaceID, startStatus, userID, agentID).Scan(&issueID); err != nil {
+			VALUES ($1, $2, $3, 'none', $4, 'member', $5, 0, 'agent', $6)
+			RETURNING id`, workspaceID, opts.prefix+" issue", startStatus, userID, opts.number, agentID).Scan(&issueID); err != nil {
 			t.Fatalf("create issue: %v", err)
 		}
 	} else {
 		if err := pool.QueryRow(ctx, `
 			INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position)
-			VALUES ($1, 'mrt issue', $2, 'none', $3, 'member', 700002, 0)
-			RETURNING id`, workspaceID, startStatus, userID).Scan(&issueID); err != nil {
+			VALUES ($1, $2, $3, 'none', $4, 'member', $5, 0)
+			RETURNING id`, workspaceID, opts.prefix+" issue", startStatus, userID, opts.number).Scan(&issueID); err != nil {
 			t.Fatalf("create issue: %v", err)
 		}
 	}
 
 	t.Cleanup(func() {
 		c := context.Background()
+		pool.Exec(c, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
 		pool.Exec(c, `DELETE FROM issue WHERE id = $1`, issueID)
 		pool.Exec(c, `DELETE FROM agent WHERE id = $1`, agentID)
 		pool.Exec(c, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
@@ -78,78 +107,110 @@ func markRunningFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s
 		pool.Exec(c, `DELETE FROM "user" WHERE id = $1`, userID)
 	})
 
-	issue, err := queries.GetIssue(ctx, util.MustParseUUID(issueID))
+	loaded, err := queries.GetIssue(ctx, util.MustParseUUID(issueID))
 	if err != nil {
 		t.Fatalf("load fixture issue: %v", err)
 	}
-	return issue, agentName
+	return loaded, agentName, agentID, runtimeID
 }
 
-func TestMarkIssueRunningPromotesTodo(t *testing.T) {
-	ctx := context.Background()
-	pool := newTaskClaimRacePool(t)
-	svc := NewTaskService(db.New(pool), pool, nil, events.New())
-
-	issue, agentName := markRunningFixture(t, ctx, pool, StatusTodo, false)
-	svc.MarkIssueRunning(ctx, issue, agentName)
-
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
+// createLifecycleTask inserts an agent_task_queue row for the given
+// agent/runtime/issue. attempt/maxAttempts default to 1/2 - the values the
+// auto-retry test (TestFailTaskDoesNotBlockWhenAutoRetryIsPending) needs to
+// have exactly one attempt left, so FailTask's retry-eligibility check finds
+// budget remaining. Every other test's assertions are insensitive to these
+// two values, so they share the same default rather than each test wiring
+// its own.
+func createLifecycleTask(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, runtimeID, issueID, taskStatus string) string {
+	t.Helper()
+	const attempt, maxAttempts = 1, 2
+	var taskID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context, attempt, max_attempts)
+		VALUES ($1, $2, $3, $4, 0, '{}'::jsonb, $5, $6)
+		RETURNING id`, agentID, runtimeID, issueID, taskStatus, attempt, maxAttempts).Scan(&taskID); err != nil {
+		t.Fatalf("create task: %v", err)
 	}
-	if status != StatusInProgress {
-		t.Fatalf("status = %q, want %q", status, StatusInProgress)
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+	})
+	return taskID
+}
+
+// installStatusFailTrigger makes the real UPDATE issue SET status = ...
+// statement fail for exactly the given issue row, so tests can prove a
+// caller survives that failure. Uses a fixed trigger/function name (not one
+// suffixed with UnixNano) and drops any leftover before creating: a
+// UnixNano-suffixed name is only ever removed by t.Cleanup, so a Ctrl-C, a
+// -timeout kill, or a panic elsewhere leaves the trigger on the shared dev
+// database permanently, accumulating one per aborted run. The fixed name
+// plus DROP ... IF EXISTS makes each run self-healing regardless of how the
+// last one ended. The WHEN clause still scopes the trigger to one row so a
+// concurrent run touching other issues is unaffected.
+func installStatusFailTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, issueID string) {
+	t.Helper()
+	triggerName := "lifecycle_status_fail_" + name
+	functionName := triggerName + "_fn"
+
+	drop := func() {
+		pool.Exec(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON issue", quoteIdent(triggerName)))
+		pool.Exec(context.Background(), fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", quoteIdent(functionName)))
+	}
+	drop()
+	t.Cleanup(drop)
+
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION %s()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $$
+		BEGIN
+			RAISE EXCEPTION 'lifecycle_status_fail: forced status write failure';
+		END;
+		$$;
+	`, quoteIdent(functionName))); err != nil {
+		t.Fatalf("create status-fail trigger function: %v", err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE UPDATE OF status ON issue
+		FOR EACH ROW
+		WHEN (NEW.id = %s::uuid)
+		EXECUTE FUNCTION %s();
+	`, quoteIdent(triggerName), quoteLiteral(issueID), quoteIdent(functionName))); err != nil {
+		t.Fatalf("create status-fail trigger: %v", err)
 	}
 }
 
-func TestMarkIssueRunningPromotesBlocked(t *testing.T) {
-	ctx := context.Background()
-	pool := newTaskClaimRacePool(t)
-	svc := NewTaskService(db.New(pool), pool, nil, events.New())
-
-	issue, agentName := markRunningFixture(t, ctx, pool, StatusBlocked, false)
-	svc.MarkIssueRunning(ctx, issue, agentName)
-
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
+func TestMarkIssueRunningPromotesOrLeavesAlone(t *testing.T) {
+	cases := []struct {
+		name  string
+		start string
+		want  string
+	}{
+		{"PromotesTodo", StatusTodo, StatusInProgress},
+		{"PromotesBlocked", StatusBlocked, StatusInProgress},
+		{"LeavesDoneAlone", StatusDone, StatusDone},
+		{"LeavesInReviewAlone", StatusInReview, StatusInReview},
 	}
-	if status != StatusInProgress {
-		t.Fatalf("status = %q, want %q", status, StatusInProgress)
-	}
-}
 
-func TestMarkIssueRunningLeavesDoneAlone(t *testing.T) {
-	ctx := context.Background()
-	pool := newTaskClaimRacePool(t)
-	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := newTaskClaimRacePool(t)
+			svc := NewTaskService(db.New(pool), pool, nil, events.New())
 
-	issue, agentName := markRunningFixture(t, ctx, pool, StatusDone, false)
-	svc.MarkIssueRunning(ctx, issue, agentName)
+			issue, agentName, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MRT", number: 700001}, tc.start)
+			svc.MarkIssueRunning(ctx, issue, agentName)
 
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != StatusDone {
-		t.Fatalf("status = %q, want unchanged %q", status, StatusDone)
-	}
-}
-
-func TestMarkIssueRunningLeavesInReviewAlone(t *testing.T) {
-	ctx := context.Background()
-	pool := newTaskClaimRacePool(t)
-	svc := NewTaskService(db.New(pool), pool, nil, events.New())
-
-	issue, agentName := markRunningFixture(t, ctx, pool, StatusInReview, false)
-	svc.MarkIssueRunning(ctx, issue, agentName)
-
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != StatusInReview {
-		t.Fatalf("status = %q, want unchanged %q", status, StatusInReview)
+			var status string
+			if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+				t.Fatalf("read status: %v", err)
+			}
+			if status != tc.want {
+				t.Fatalf("status = %q, want %q", status, tc.want)
+			}
+		})
 	}
 }
 
@@ -158,7 +219,7 @@ func TestMarkIssueRunningKeepsTheAssignee(t *testing.T) {
 	pool := newTaskClaimRacePool(t)
 	svc := NewTaskService(db.New(pool), pool, nil, events.New())
 
-	issue, agentName := markRunningFixture(t, ctx, pool, StatusTodo, true)
+	issue, agentName, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MRT", number: 700002, assign: true}, StatusTodo)
 	if !issue.AssigneeID.Valid {
 		t.Fatal("fixture issue expected to start assigned")
 	}
@@ -174,7 +235,7 @@ func TestMarkIssueRunningKeepsTheAssignee(t *testing.T) {
 		t.Fatalf("status = %q, want %q", status, StatusInProgress)
 	}
 	if assigneeType != "agent" || !assigneeID.Valid || assigneeID != issue.AssigneeID {
-		t.Fatalf("assignee changed: type=%q id=%v, want unchanged from %v", assigneeType, assigneeID, issue.AssigneeID)
+		t.Fatalf("assignee changed: type=%q id.valid=%v, want unchanged from id.valid=%v", assigneeType, assigneeID.Valid, issue.AssigneeID.Valid)
 	}
 }
 
@@ -184,11 +245,11 @@ func TestMarkIssueRunningPublishesIssueUpdated(t *testing.T) {
 	bus := events.New()
 	svc := NewTaskService(db.New(pool), pool, nil, bus)
 
-	issue, agentName := markRunningFixture(t, ctx, pool, StatusTodo, false)
+	issue, agentName, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MRT", number: 700003}, StatusTodo)
 
 	var got events.Event
 	seen := false
-	bus.Subscribe("issue:updated", func(e events.Event) {
+	bus.Subscribe(protocol.EventIssueUpdated, func(e events.Event) {
 		seen = true
 		got = e
 	})
@@ -224,120 +285,23 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 	ctx := context.Background()
 	pool := newTaskClaimRacePool(t)
 	svc := NewTaskService(db.New(pool), pool, nil, events.New())
-	queries := db.New(pool)
-	suffix := time.Now().UnixNano()
 
-	var userID string
-	if err := pool.QueryRow(ctx, `INSERT INTO "user" (name, email) VALUES ($1,$2) RETURNING id`,
-		"Dispatch Survives Test", fmt.Sprintf("dispatch-survives-%d@multica.ai", suffix)).Scan(&userID); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, userID)
-	})
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "DST", number: 700004, webhook: true}, StatusTodo)
+	issueID := util.UUIDToString(issue.ID)
 
-	var workspaceID string
-	if err := pool.QueryRow(ctx, `INSERT INTO workspace (name, slug, description, issue_prefix) VALUES ($1,$2,$3,$4) RETURNING id`,
-		"Dispatch Survives Test", fmt.Sprintf("dispatch-survives-%d", suffix), "temp dispatch-survives test", "DST").Scan(&workspaceID); err != nil {
-		t.Fatalf("create workspace: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, workspaceID)
-	})
+	installStatusFailTrigger(t, ctx, pool, "dispatch", issueID)
 
-	if _, err := pool.Exec(ctx, `INSERT INTO member (workspace_id, user_id, role) VALUES ($1,$2,'owner')`, workspaceID, userID); err != nil {
-		t.Fatalf("create member: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM member WHERE workspace_id = $1 AND user_id = $2`, workspaceID, userID)
-	})
+	taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, issueID, "queued")
 
-	var runtimeID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, visibility, owner_id, webhook_url, webhook_secret, webhook_event_type)
-		VALUES ($1, 'daemon-dst', 'DST RT', 'webhook', 'dst_provider', 'online', 'x', '{}'::jsonb, now(), 'private', $2, 'http://127.0.0.1:1/unreachable', 'dst-secret', 'task.dispatched')
-		RETURNING id`, workspaceID, userID).Scan(&runtimeID); err != nil {
-		t.Fatalf("create runtime: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
-	})
-
-	var agentID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO agent (workspace_id, name, description, runtime_mode, runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id)
-		VALUES ($1, 'DST Agent', '', 'cloud', '{}'::jsonb, $2, 'private', 5, $3)
-		RETURNING id`, workspaceID, runtimeID, userID).Scan(&agentID); err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM agent WHERE id = $1`, agentID)
-	})
-
-	var issueID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position)
-		VALUES ($1, 'dispatch survives issue', 'todo', 'none', $2, 'member', 700003, 0)
-		RETURNING id`, workspaceID, userID).Scan(&issueID); err != nil {
-		t.Fatalf("create issue: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
-	})
-
-	// Force the real UPDATE issue SET status = ... to fail, scoped by a WHEN
-	// clause to exactly this fixture's issue row so it cannot affect anything
-	// else in the shared database.
-	triggerName := fmt.Sprintf("dispatch_survives_status_fail_%d", suffix)
-	functionName := triggerName + "_fn"
-	if _, err := pool.Exec(ctx, fmt.Sprintf(`
-		CREATE FUNCTION %s()
-		RETURNS trigger
-		LANGUAGE plpgsql
-		AS $$
-		BEGIN
-			RAISE EXCEPTION 'dispatch_survives: forced status write failure';
-		END;
-		$$;
-	`, quoteIdent(functionName))); err != nil {
-		t.Fatalf("create status-fail trigger function: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", quoteIdent(functionName)))
-	})
-	if _, err := pool.Exec(ctx, fmt.Sprintf(`
-		CREATE TRIGGER %s
-		BEFORE UPDATE OF status ON issue
-		FOR EACH ROW
-		WHEN (NEW.id = %s::uuid)
-		EXECUTE FUNCTION %s();
-	`, quoteIdent(triggerName), quoteLiteral(issueID), quoteIdent(functionName))); err != nil {
-		t.Fatalf("create status-fail trigger: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON issue", quoteIdent(triggerName)))
-	})
-
-	var taskID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context)
-		VALUES ($1, $2, $3, 'queued', 0, '{}'::jsonb)
-		RETURNING id`, agentID, runtimeID, issueID).Scan(&taskID); err != nil {
-		t.Fatalf("create queued task: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
-	})
-
-	task, err := queries.GetAgentTask(ctx, util.MustParseUUID(taskID))
+	task, err := svc.Queries.GetAgentTask(ctx, util.MustParseUUID(taskID))
 	if err != nil {
 		t.Fatalf("load task: %v", err)
 	}
-	runtime, err := queries.GetAgentRuntime(ctx, util.MustParseUUID(runtimeID))
+	runtime, err := svc.Queries.GetAgentRuntime(ctx, util.MustParseUUID(runtimeID))
 	if err != nil {
 		t.Fatalf("load runtime: %v", err)
 	}
-	agent, err := queries.GetAgent(ctx, util.MustParseUUID(agentID))
+	agent, err := svc.Queries.GetAgent(ctx, util.MustParseUUID(agentID))
 	if err != nil {
 		t.Fatalf("load agent: %v", err)
 	}
@@ -361,120 +325,37 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 	}
 }
 
-// failTaskFixture provisions a workspace/user/agent/runtime/issue quintet for
-// FailTask/MarkIssueBlocked tests. The issue starts at the given status and
-// is assigned to the fixture's own agent (FailTask's blocked path is only
-// interesting when there is an assignee to clear). Returns the issue row and
-// a task-creation helper bound to this fixture's agent/runtime.
-func failTaskFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, startStatus string) (db.Issue, func(taskStatus string, extra ...func(*failTaskParams)) string) {
-	t.Helper()
-	suffix := time.Now().UnixNano()
-	queries := db.New(pool)
-
-	var userID string
-	if err := pool.QueryRow(ctx, `INSERT INTO "user" (name, email) VALUES ($1,$2) RETURNING id`,
-		"Fail Task Test", fmt.Sprintf("fail-task-%d@multica.ai", suffix)).Scan(&userID); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	var workspaceID string
-	if err := pool.QueryRow(ctx, `INSERT INTO workspace (name, slug, description, issue_prefix) VALUES ($1,$2,$3,$4) RETURNING id`,
-		"Fail Task Test", fmt.Sprintf("fail-task-%d", suffix), "temp fail-task test", "FTT").Scan(&workspaceID); err != nil {
-		t.Fatalf("create workspace: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO member (workspace_id, user_id, role) VALUES ($1,$2,'owner')`, workspaceID, userID); err != nil {
-		t.Fatalf("create member: %v", err)
-	}
-	var runtimeID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO agent_runtime (workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, visibility, owner_id)
-		VALUES ($1, 'daemon-ftt', 'FTT RT', 'cloud', 'ftt_provider', 'online', 'x', '{}'::jsonb, now(), 'private', $2)
-		RETURNING id`, workspaceID, userID).Scan(&runtimeID); err != nil {
-		t.Fatalf("create runtime: %v", err)
-	}
-	var agentID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO agent (workspace_id, name, description, runtime_mode, runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id)
-		VALUES ($1, $2, '', 'cloud', '{}'::jsonb, $3, 'private', 5, $4)
-		RETURNING id`, workspaceID, fmt.Sprintf("FTT Agent %d", suffix), runtimeID, userID).Scan(&agentID); err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	var issueID string
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position, assignee_type, assignee_id)
-		VALUES ($1, 'ftt issue', $2, 'none', $3, 'member', 700004, 0, 'agent', $4)
-		RETURNING id`, workspaceID, startStatus, userID, agentID).Scan(&issueID); err != nil {
-		t.Fatalf("create issue: %v", err)
+func TestFailTaskBlocksOrLeavesAlone(t *testing.T) {
+	cases := []struct {
+		name  string
+		start string
+		want  string
+	}{
+		{"BlocksTheIssue", StatusInProgress, StatusBlocked},
+		{"LeavesDoneAlone", StatusDone, StatusDone},
 	}
 
-	t.Cleanup(func() {
-		c := context.Background()
-		pool.Exec(c, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
-		pool.Exec(c, `DELETE FROM issue WHERE id = $1`, issueID)
-		pool.Exec(c, `DELETE FROM agent WHERE id = $1`, agentID)
-		pool.Exec(c, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
-		pool.Exec(c, `DELETE FROM member WHERE workspace_id = $1 AND user_id = $2`, workspaceID, userID)
-		pool.Exec(c, `DELETE FROM workspace WHERE id = $1`, workspaceID)
-		pool.Exec(c, `DELETE FROM "user" WHERE id = $1`, userID)
-	})
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := newTaskClaimRacePool(t)
+			svc := NewTaskService(db.New(pool), pool, nil, events.New())
 
-	issue, err := queries.GetIssue(ctx, util.MustParseUUID(issueID))
-	if err != nil {
-		t.Fatalf("load fixture issue: %v", err)
-	}
+			issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "FTT", number: 700005 + int32(i), assign: true}, tc.start)
+			taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, util.UUIDToString(issue.ID), "running")
 
-	createTask := func(taskStatus string, extra ...func(*failTaskParams)) string {
-		p := failTaskParams{attempt: 1, maxAttempts: 2}
-		for _, fn := range extra {
-			fn(&p)
-		}
-		var taskID string
-		if err := pool.QueryRow(ctx, `
-			INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, context, attempt, max_attempts)
-			VALUES ($1, $2, $3, $4, 0, '{}'::jsonb, $5, $6)
-			RETURNING id`, agentID, runtimeID, issueID, taskStatus, p.attempt, p.maxAttempts).Scan(&taskID); err != nil {
-			t.Fatalf("create task: %v", err)
-		}
-		t.Cleanup(func() {
-			pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+			if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
+				t.Fatalf("FailTask: %v", err)
+			}
+
+			var status string
+			if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+				t.Fatalf("read issue status: %v", err)
+			}
+			if status != tc.want {
+				t.Fatalf("issue status = %q, want %q", status, tc.want)
+			}
 		})
-		return taskID
-	}
-
-	return issue, createTask
-}
-
-// failTaskParams tunes the task row created by failTaskFixture's createTask
-// helper for the small number of tests that need a non-default attempt.
-type failTaskParams struct {
-	attempt     int32
-	maxAttempts int32
-}
-
-func withAttempt(attempt, maxAttempts int32) func(*failTaskParams) {
-	return func(p *failTaskParams) {
-		p.attempt = attempt
-		p.maxAttempts = maxAttempts
-	}
-}
-
-func TestFailTaskBlocksTheIssue(t *testing.T) {
-	ctx := context.Background()
-	pool := newTaskClaimRacePool(t)
-	svc := NewTaskService(db.New(pool), pool, nil, events.New())
-
-	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
-	taskID := createTask("running")
-
-	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
-		t.Fatalf("FailTask: %v", err)
-	}
-
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
-		t.Fatalf("read issue status: %v", err)
-	}
-	if status != StatusBlocked {
-		t.Fatalf("issue status = %q, want %q", status, StatusBlocked)
 	}
 }
 
@@ -483,11 +364,11 @@ func TestFailTaskClearsBothAssigneeFields(t *testing.T) {
 	pool := newTaskClaimRacePool(t)
 	svc := NewTaskService(db.New(pool), pool, nil, events.New())
 
-	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "FTT", number: 700007, assign: true}, StatusInProgress)
 	if !issue.AssigneeID.Valid {
 		t.Fatal("fixture issue expected to start assigned")
 	}
-	taskID := createTask("running")
+	taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, util.UUIDToString(issue.ID), "running")
 
 	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
 		t.Fatalf("FailTask: %v", err)
@@ -500,28 +381,7 @@ func TestFailTaskClearsBothAssigneeFields(t *testing.T) {
 		t.Fatalf("read issue assignee: %v", err)
 	}
 	if assigneeType.Valid || assigneeID.Valid {
-		t.Fatalf("assignee_type=%v assignee_id=%v, want both NULL", assigneeType, assigneeID)
-	}
-}
-
-func TestFailTaskLeavesDoneAlone(t *testing.T) {
-	ctx := context.Background()
-	pool := newTaskClaimRacePool(t)
-	svc := NewTaskService(db.New(pool), pool, nil, events.New())
-
-	issue, createTask := failTaskFixture(t, ctx, pool, StatusDone)
-	taskID := createTask("running")
-
-	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
-		t.Fatalf("FailTask: %v", err)
-	}
-
-	var status string
-	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
-		t.Fatalf("read issue status: %v", err)
-	}
-	if status != StatusDone {
-		t.Fatalf("issue status = %q, want unchanged %q", status, StatusDone)
+		t.Fatalf("assignee_type.valid=%v assignee_id.valid=%v, want both NULL", assigneeType.Valid, assigneeID.Valid)
 	}
 }
 
@@ -535,40 +395,11 @@ func TestFailTaskStillFailsTheTaskWhenTheIssueWriteFails(t *testing.T) {
 	pool := newTaskClaimRacePool(t)
 	svc := NewTaskService(db.New(pool), pool, nil, events.New())
 
-	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
-	taskID := createTask("running")
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "FTT", number: 700008, assign: true}, StatusInProgress)
+	issueID := util.UUIDToString(issue.ID)
+	taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, issueID, "running")
 
-	suffix := time.Now().UnixNano()
-	triggerName := fmt.Sprintf("fail_task_status_fail_%d", suffix)
-	functionName := triggerName + "_fn"
-	issueIDStr := util.UUIDToString(issue.ID)
-	if _, err := pool.Exec(ctx, fmt.Sprintf(`
-		CREATE FUNCTION %s()
-		RETURNS trigger
-		LANGUAGE plpgsql
-		AS $$
-		BEGIN
-			RAISE EXCEPTION 'fail_task: forced status write failure';
-		END;
-		$$;
-	`, quoteIdent(functionName))); err != nil {
-		t.Fatalf("create status-fail trigger function: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", quoteIdent(functionName)))
-	})
-	if _, err := pool.Exec(ctx, fmt.Sprintf(`
-		CREATE TRIGGER %s
-		BEFORE UPDATE OF status ON issue
-		FOR EACH ROW
-		WHEN (NEW.id = %s::uuid)
-		EXECUTE FUNCTION %s();
-	`, quoteIdent(triggerName), quoteLiteral(issueIDStr), quoteIdent(functionName))); err != nil {
-		t.Fatalf("create status-fail trigger: %v", err)
-	}
-	t.Cleanup(func() {
-		pool.Exec(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON issue", quoteIdent(triggerName)))
-	})
+	installStatusFailTrigger(t, ctx, pool, "failtask", issueID)
 
 	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "agent_error"); err != nil {
 		t.Fatalf("FailTask: %v", err)
@@ -595,14 +426,15 @@ func TestFailTaskStillFailsTheTaskWhenTheIssueWriteFails(t *testing.T) {
 // MarkIssueBlocked: a failure whose reason is retryable and has remaining
 // attempt budget must leave the issue exactly where it was (in_progress) and
 // create a retry child, not park the card at blocked. See retryableReasons
-// and retryEligible in task.go.
+// and retryEligible in task.go. createLifecycleTask's default attempt=1,
+// maxAttempts=2 is exactly the budget this test depends on.
 func TestFailTaskDoesNotBlockWhenAutoRetryIsPending(t *testing.T) {
 	ctx := context.Background()
 	pool := newTaskClaimRacePool(t)
 	svc := NewTaskService(db.New(pool), pool, nil, events.New())
 
-	issue, createTask := failTaskFixture(t, ctx, pool, StatusInProgress)
-	taskID := createTask("running", withAttempt(1, 2))
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "FTT", number: 700009, assign: true}, StatusInProgress)
+	taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, util.UUIDToString(issue.ID), "running")
 
 	if _, err := svc.FailTask(ctx, util.MustParseUUID(taskID), "boom", "", "", "timeout"); err != nil {
 		t.Fatalf("FailTask: %v", err)

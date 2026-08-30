@@ -3136,7 +3136,9 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	// visible on the board instead of in the issue feed.
 	if task.IssueID.Valid && retried == nil {
 		if issue, err := s.Queries.GetIssue(ctx, task.IssueID); err != nil {
-			slog.Error("fail task: load issue for blocked status", "err", err, "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
+			if !errors.Is(err, pgx.ErrNoRows) {
+				slog.Error("fail task: load issue for blocked status", "error", err, "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
+			}
 		} else {
 			s.MarkIssueBlocked(ctx, issue, failureReason)
 		}
