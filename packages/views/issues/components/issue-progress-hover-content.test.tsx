@@ -176,6 +176,7 @@ describe("IssueProgressHoverContent", () => {
           tokens: tokens(100, 50, 25, 900),
           turns: 21,
           max_turns: 20,
+          failure_reason: "claude-max-turns",
           is_live: false,
         },
         {
@@ -197,8 +198,12 @@ describe("IssueProgressHoverContent", () => {
 
     renderContent(<IssueProgressHoverContent issueId="i1" />);
 
-    expect(rowCells("review")[3]).toBe("21/20");
+    // The turn column is a bare count: the cap counts different things and
+    // never belonged in a ratio with it.
+    expect(rowCells("review")[3]).toBe("21");
     expect(rowCells("fixer")[3]).toBe("7");
+    // The signal the ratio used to hint at, now stated by the run itself.
+    expect(rowCells("review")[0]).toContain("max turns");
   });
 
   it("renders history with no live row and a Completed footer when nothing runs", () => {

@@ -824,12 +824,21 @@ export const IssueProgressTaskSchema = z.object({
     cache_read: 0,
   }),
   turns: z.number().default(0),
-  // The agent's --max-turns budget, or 0 for "no cap declared". The UI shows
-  // "21/20" when it is known so a run that died at its ceiling says so; 0
-  // means unknown and must render a bare count, never an invented
-  // denominator. Servers that predate the field send nothing and default to 0.
+  // The agent's --max-turns budget, or 0 for "no cap declared". NO LONGER
+  // RENDERED as a denominator: it counts tool-use turns only, while `turns`
+  // counts more than that, so "21/20" was comparing two different quantities
+  // (see formatTurns). Kept because it is a real fact about the agent and a
+  // future tool-use-turn count could compare against it honestly. Servers
+  // that predate the field send nothing and default to 0.
   max_turns: z.number().default(0),
   is_live: z.boolean().default(false),
+  // The run's own word for why it ended, "" when it did not fail. This is
+  // what makes a failed step diagnosable; the turn count cannot, because
+  // --max-turns counts tool-use turns only while `turns` also counts the
+  // final text turn, so a run that stopped exactly at its budget reads as
+  // over it and so can a healthy one. Servers that predate the field send
+  // nothing and default to "".
+  failure_reason: z.string().default(""),
 }).loose();
 
 export const IssueProgressSchema = z.object({

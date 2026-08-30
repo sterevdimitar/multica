@@ -9,6 +9,7 @@ import {
   formatTokens,
   formatTurns,
   groupProgressRows,
+  shortFailureReason,
   shortStepName,
   type ProgressRow,
 } from "../surface/progress";
@@ -168,6 +169,14 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
                 {shortStepName(row.agentName)}
                 {row.count > 1 && (
                   <span className="ml-1 text-muted-foreground">{`×${row.count}`}</span>
+                )}
+                {/* The reason a failed step failed, in its own words. This
+                    replaces the "21/20" ratio that used to hint at it and
+                    could not do so correctly — see formatTurns. */}
+                {row.status === "failed" && row.failureReason && (
+                  <span className="ml-1 text-muted-foreground" title={row.failureReason}>
+                    {shortFailureReason(row.failureReason)}
+                  </span>
                 )}
               </td>
               <td className="text-right">{formatElapsed(liveElapsed(row))}</td>

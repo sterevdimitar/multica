@@ -58,6 +58,13 @@ type IssueProgressTask struct {
 	// inventing a denominator.
 	MaxTurns int64 `json:"max_turns"`
 	IsLive   bool  `json:"is_live"`
+	// FailureReason is the run's own word for why it ended, or "" when it
+	// did not fail. It is what makes a failed step diagnosable: the turn
+	// count cannot do that job, because `--max-turns` counts tool-use turns
+	// only while the reported turn count also counts the final text turn,
+	// so a run that stopped exactly at its budget reads as over it and so
+	// can a perfectly healthy one.
+	FailureReason string `json:"failure_reason"`
 }
 
 type IssueProgressResponse struct {
@@ -108,9 +115,10 @@ func (h *Handler) GetIssueProgress(w http.ResponseWriter, r *http.Request) {
 				CacheCreation: row.CacheWriteTokens,
 				CacheRead:     row.CacheReadTokens,
 			},
-			Turns:    row.NumTurns,
-			MaxTurns: maxTurnsFromCustomArgs(row.AgentCustomArgs),
-			IsLive:   liveTaskStatuses[row.Status],
+			Turns:         row.NumTurns,
+			MaxTurns:      maxTurnsFromCustomArgs(row.AgentCustomArgs),
+			IsLive:        liveTaskStatuses[row.Status],
+			FailureReason: row.FailureReason.String,
 		})
 	}
 

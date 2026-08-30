@@ -5,6 +5,7 @@ import {
   displayTokens,
   formatTokens,
   formatTurns,
+  shortFailureReason,
   groupProgressRows,
   shortStepName,
 } from "./progress";
@@ -140,10 +141,33 @@ describe("turn caps", () => {
 });
 
 describe("formatTurns", () => {
-  it("shows the cap when known and a bare count when not", () => {
-    expect(formatTurns(21, 20)).toBe("21/20");
-    expect(formatTurns(7, 40)).toBe("7/40");
+  // The cap is deliberately NOT rendered. --max-turns counts tool-use turns
+  // only, while `turns` also counts the final text turn and each parallel
+  // tool call, so "21/20" invited readers to diagnose an overrun from two
+  // quantities that were never comparable. A run that stops exactly at its
+  // budget reports above it, and so can one that never came close.
+  it("renders the bare count, never a ratio against the cap", () => {
+    expect(formatTurns(21, 20)).toBe("21");
+    expect(formatTurns(7, 40)).toBe("7");
     expect(formatTurns(7, 0)).toBe("7");
+  });
+});
+
+describe("shortFailureReason", () => {
+  it("shortens the reasons the pipeline records", () => {
+    expect(shortFailureReason("claude-max-turns")).toBe("max turns");
+    expect(shortFailureReason("claude-max-budget")).toBe("max budget");
+    expect(shortFailureReason("gha-workflow-failure")).toBe("gha workflow failure");
+  });
+
+  // A reason this code has not heard of is still the run's own word, and is
+  // better than showing nothing next to a ✗.
+  it("passes through an unknown reason", () => {
+    expect(shortFailureReason("something_new")).toBe("something new");
+  });
+
+  it("renders nothing for a run that did not fail", () => {
+    expect(shortFailureReason("")).toBe("");
   });
 });
 

@@ -177,8 +177,14 @@ ORDER BY total_seconds DESC;
 -- turn budget retroactively changes the denominator on historical rows. The
 -- alternative is a per-task column and a migration, which is not worth it for
 -- a display number.
+-- failure_reason is carried so a failed step can say WHY on the board. The
+-- turn count cannot: `--max-turns` counts tool-use turns only while the
+-- reported num_turns also counts the final text turn, so a run that stopped
+-- exactly at its budget reads as over it and a healthy run can too. The
+-- reason is the run's own word for what happened.
 SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
        atq.created_at, atq.started_at, atq.completed_at,
+       atq.failure_reason,
        a.custom_args AS agent_custom_args,
        COALESCE(SUM(tu.input_tokens), 0)::bigint       AS input_tokens,
        COALESCE(SUM(tu.output_tokens), 0)::bigint      AS output_tokens,
@@ -189,7 +195,7 @@ FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 LEFT JOIN task_usage tu ON tu.task_id = atq.id
 WHERE atq.issue_id = $1
-GROUP BY atq.id, a.name, a.custom_args, atq.status, atq.created_at, atq.started_at, atq.completed_at
+GROUP BY atq.id, a.name, a.custom_args, atq.status, atq.created_at, atq.started_at, atq.completed_at, atq.failure_reason
 ORDER BY COALESCE(atq.started_at, atq.created_at) ASC;
 
 -- name: GetAutopilotAssigneeForIssue :one
