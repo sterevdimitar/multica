@@ -148,6 +148,15 @@ func createLifecycleTask(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 // plus DROP ... IF EXISTS makes each run self-healing regardless of how the
 // last one ended. The WHEN clause still scopes the trigger to one row so a
 // concurrent run touching other issues is unaffected.
+//
+// Hazard: the WHEN clause scopes the trigger's firing to one row, but the
+// DROP TRIGGER / CREATE FUNCTION / CREATE TRIGGER statements above take an
+// ACCESS EXCLUSIVE lock on the shared issue table, and the name is fixed
+// (not per-run). Two copies of this suite running at the same time will
+// destroy each other: run B's DROP removes run A's still-live trigger,
+// silently inverting whatever run A is in the middle of asserting. Do not
+// run this test suite concurrently with another copy of itself against the
+// same database.
 func installStatusFailTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, issueID string) {
 	t.Helper()
 	triggerName := "lifecycle_status_fail_" + name
@@ -192,6 +201,12 @@ func installStatusFailTrigger(t *testing.T, ctx context.Context, pool *pgxpool.P
 // so the test) fails. Same shape as installStatusFailTrigger: fixed names,
 // DROP ... IF EXISTS before CREATE, a row-scoped WHEN clause, drops
 // registered in t.Cleanup.
+//
+// Hazard: same as installStatusFailTrigger above - the WHEN clause scopes
+// firing to one row, but the DDL itself takes an ACCESS EXCLUSIVE lock on the
+// shared comment table under a fixed name. Two simultaneous runs of this
+// suite will destroy each other's triggers. Do not run this test suite
+// concurrently with another copy of itself against the same database.
 func installCommentBeforeAssigneeClearTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, issueID string) {
 	t.Helper()
 	triggerName := "lifecycle_comment_assignee_" + name
@@ -320,6 +335,41 @@ func TestBlockedCommentCarriesNoMentionLink(t *testing.T) {
 	}
 }
 
+// TestBlockedCommentNeutralisesCodeSpanBreakers proves the F5 hardening:
+// failure_reason is not constrained to the classifier's taxonomy at the API
+// boundary (TaskFailRequest.FailureReason passes it through unchecked), so a
+// backtick or newline in a reason must not be able to break the markdown code
+// span blockedReasonCommentBody interpolates it into.
+func TestBlockedCommentNeutralisesCodeSpanBreakers(t *testing.T) {
+	reasons := []string{
+		"config-drift`with`backticks",
+		"multi\nline\nreason",
+	}
+	for _, reason := range reasons {
+		t.Run(reason, func(t *testing.T) {
+			body := blockedReasonCommentBody(reason)
+			if body[0] == '/' {
+				t.Fatalf("comment body must never start with '/', got %q", body)
+			}
+			if strings.Contains(body, "mention://") {
+				t.Fatalf("comment body must never contain a mention:// link, got %q", body)
+			}
+			// The interpolated reason must not contain a raw backtick or
+			// newline, or it would close the code span early / break it
+			// across lines.
+			start := strings.Index(body, "`")
+			end := strings.LastIndex(body, "`")
+			if start == -1 || end == -1 || start == end {
+				t.Fatalf("comment body must contain a closed code span, got %q", body)
+			}
+			inner := body[start+1 : end]
+			if strings.Contains(inner, "`") || strings.Contains(inner, "\n") {
+				t.Fatalf("code span contents must not contain a backtick or newline, got %q", inner)
+			}
+		})
+	}
+}
+
 // TestNoCommentWhenTheStatusWriteFailed proves MarkIssueBlocked posts nothing
 // when the status write it depends on fails: a reason comment on a card that
 // never moved would describe a state that doesn't exist. Calls
@@ -352,6 +402,8 @@ func TestMarkIssueRunningPromotesOrLeavesAlone(t *testing.T) {
 	}{
 		{"PromotesTodo", StatusTodo, StatusInProgress},
 		{"PromotesBlocked", StatusBlocked, StatusInProgress},
+		{"PromotesBacklog", StatusBacklog, StatusInProgress},
+		{"RedispatchesInProgress", StatusInProgress, StatusInProgress},
 		{"LeavesDoneAlone", StatusDone, StatusDone},
 		{"LeavesInReviewAlone", StatusInReview, StatusInReview},
 	}
@@ -484,6 +536,47 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 	}
 	if issueStatus != StatusTodo {
 		t.Fatalf("issue status = %q, want unchanged %q since the write genuinely failed", issueStatus, StatusTodo)
+	}
+}
+
+// TestDispatchWritesInProgress proves the headline behaviour of this branch:
+// dispatching a queued webhook task actually writes in_progress onto its
+// issue, not merely that dispatch survives when that write fails (see
+// TestDispatchProceedsWhenTheStatusWriteFails above, which only covers the
+// negative). Uses the same webhook-mode fixture and unreachable webhook_url
+// as that test - the POST itself is fire-and-forget in a background
+// goroutine and irrelevant here.
+func TestDispatchWritesInProgress(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "DWP", number: 700013, webhook: true}, StatusTodo)
+	issueID := util.UUIDToString(issue.ID)
+
+	taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, issueID, "queued")
+
+	task, err := svc.Queries.GetAgentTask(ctx, util.MustParseUUID(taskID))
+	if err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	runtime, err := svc.Queries.GetAgentRuntime(ctx, util.MustParseUUID(runtimeID))
+	if err != nil {
+		t.Fatalf("load runtime: %v", err)
+	}
+	agent, err := svc.Queries.GetAgent(ctx, util.MustParseUUID(agentID))
+	if err != nil {
+		t.Fatalf("load agent: %v", err)
+	}
+
+	svc.dispatchWebhookTask(ctx, task, runtime, agent)
+
+	var issueStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&issueStatus); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if issueStatus != StatusInProgress {
+		t.Fatalf("issue status = %q, want %q after dispatch", issueStatus, StatusInProgress)
 	}
 }
 

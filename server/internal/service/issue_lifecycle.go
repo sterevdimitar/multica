@@ -37,9 +37,9 @@ const (
 var runStartStatusByAgent = map[string]string{}
 
 // RunStartStatus returns the issue status a dispatched task writes for the
-// given agent. Every agent maps to StatusInProgress today; the table is the
-// extension point for per-phase statuses (reviewing / fixing / judging),
-// which additionally require a migration to the status CHECK constraint.
+// given agent. Every agent maps to StatusInProgress today; see
+// runStartStatusByAgent above for the extension point and why it needs a
+// migration first.
 func RunStartStatus(agentName string) string {
 	if status, ok := runStartStatusByAgent[agentName]; ok {
 		return status
@@ -78,9 +78,8 @@ var promotableStatuses = map[string]bool{
 
 // MayPromoteToRunning reports whether a card at the given status may be
 // touched by either lifecycle writer - a starting run promoting it to running,
-// or a failed run parking it as blocked. True for backlog, todo, blocked,
-// in_progress; false for in_review, done, cancelled and any unrecognised
-// value. See promotableStatuses for why the list is shared.
+// or a failed run parking it as blocked. See promotableStatuses for the list
+// and why it is shared.
 func MayPromoteToRunning(currentStatus string) bool {
 	return promotableStatuses[currentStatus]
 }
@@ -125,6 +124,11 @@ func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agen
 			"agent_name", agentName)
 		return
 	}
+	slog.Info("lifecycle: run-start status written",
+		"issue_id", util.UUIDToString(current.ID),
+		"prev_status", prevStatus,
+		"new_status", newStatus,
+		"agent_name", agentName)
 	s.broadcastIssueUpdated(updated, prevStatus)
 }
 
@@ -135,8 +139,8 @@ func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agen
 // often the routine, designed-for outcome, e.g. a task failing after its PR
 // already merged (done) or after a human moved the card to in_review), and
 // this never returns an error because no caller may change fail-task
-// behaviour on its result. failureReason is log context only; it is never
-// written to the card.
+// behaviour on its result. failureReason is also written into the posted
+// comment - see blockedReasonCommentBody below.
 //
 // The passed issue may be stale, so this re-reads its current status before
 // consulting MayPromoteToRunning - see promotableStatuses for why the guard
@@ -154,13 +158,24 @@ func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agen
 // "system" author isn't an option here). The comment MUST be posted after
 // the status write's assignee-clear has taken effect, never before:
 // createAgentComment's every caller posts a comment that may mention nobody,
-// and shouldEnqueueOnComment/isAgentAssigneeReady wakes the card's assignee
-// on exactly that shape - a still-assigned card getting a comment here would
-// risk the runaway-dispatch bug fixed by clearing the assignee first (see
-// UpdateIssueStatusAndUnassign above). Status and assignee move together in
-// that one statement, so "after the write succeeds" already satisfies the
-// ordering; the DB test for this asserts the ordering directly rather than
-// trusting it.
+// and shouldEnqueueAgentTask/shouldEnqueueAssigneeFallback wake the card's
+// assignee on exactly that shape - a still-assigned card getting a comment
+// here would risk the runaway-dispatch bug fixed by clearing the assignee
+// first (see UpdateIssueStatusAndUnassign above). Status and assignee move
+// together in that one statement, so "after the write succeeds" already
+// satisfies the ordering; the DB test for this asserts the ordering directly
+// rather than trusting it.
+//
+// This comment is itself a createAgentComment call, so it also cancels any
+// deferred escalation-fallback armed for (issueID, agentID) - see
+// CancelDeferredEscalationsForIssueAgent, logged there with reason
+// "agent_comment_acknowledged". On the common path (FailTask's errMsg != "")
+// FailTask has already posted its own comment and cancelled the same set, so
+// this is a no-op repeat. But when errMsg == "" that earlier comment is
+// skipped, so this comment is the one that cancels the escalation - and it
+// does so under a log line that says "acknowledged" for a task that actually
+// died. That mislabelling is a pre-existing, undocumented-until-now side
+// effect; it is not changed here.
 func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agentID pgtype.UUID, failureReason string) {
 	current, err := s.Queries.GetIssue(ctx, issue.ID)
 	if err != nil {
@@ -170,7 +185,7 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 		return
 	}
 	if !MayPromoteToRunning(current.Status) {
-		slog.Info("lifecycle: blocked status refused", "issue_id", util.UUIDToString(current.ID), "current_status", current.Status)
+		slog.Info("lifecycle: blocked status refused", "issue_id", util.UUIDToString(current.ID), "current_status", current.Status, "failure_reason", failureReason)
 		return
 	}
 	prevStatus := current.Status
@@ -188,9 +203,31 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 			"failure_reason", failureReason)
 		return
 	}
+	slog.Info("lifecycle: blocked status written",
+		"issue_id", util.UUIDToString(current.ID),
+		"prev_status", prevStatus,
+		"new_status", StatusBlocked)
 	s.broadcastIssueUpdated(updated, prevStatus)
 	s.createAgentComment(ctx, current.ID, agentID, blockedReasonCommentBody(failureReason), "system", pgtype.UUID{}, pgtype.UUID{})
 }
+
+// blockedCommentReasonReplacer neutralises characters in failureReason that
+// would otherwise escape the markdown code span it is interpolated into.
+// failure_reason is not constrained to the classifier's taxonomy at the API
+// boundary (TaskFailRequest.FailureReason passes it through unchecked, and
+// the daemon already sends at least one off-taxonomy literal,
+// local_directory_error), so a backtick or newline reaching here is expected,
+// not exceptional. mention:// is scrubbed for the reason described below;
+// backticks and newlines are scrubbed so the reason can never close the code
+// span early or break it across lines. The impact of not scrubbing them
+// would be cosmetic (malformed markdown, not a smuggled mention), but the
+// fix is cheap enough that there is no reason to leave it open.
+var blockedCommentReasonReplacer = strings.NewReplacer(
+	"mention://", "mention-blocked://",
+	"`", "'",
+	"\n", " ",
+	"\r", " ",
+)
 
 // blockedReasonCommentBody renders the comment MarkIssueBlocked posts after
 // parking a card. It always starts with "Classified as" - never with
@@ -200,16 +237,21 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 // It never embeds a mention:// link, describing the @-mention mechanism in
 // prose instead, so this comment can never itself dispatch an agent onto the
 // card it just blocked - and failureReason is defused before interpolation
-// so a reason string that itself contains the literal substring "mention://"
-// (classifier bug, future free-text reason, etc.) can't smuggle one in
-// either. It deliberately omits the raw error text: FailTask already posts
-// that in a separate system comment on the same condition, and this one is
-// meant to carry only what that one doesn't - the classified reason and how
-// to resume.
+// (see blockedCommentReasonReplacer) so a reason string that itself contains
+// the literal substring "mention://", a backtick, or a newline can't smuggle
+// one in or break the code span. It deliberately omits the raw error text:
+// FailTask already posts that in a separate system comment on the same
+// condition, and this one is meant to carry only what that one doesn't - the
+// classified reason and how to resume. The resume line says only what
+// actually happens: an @-mention starts a new run and the card returns to
+// in_progress. It does not promise reassignment, because nothing in this
+// backend reassigns the card - computeCommentAgentTriggers creates a task
+// from the @-mention without touching issue.assignee_*, so a resumed card
+// runs at in_progress with a NULL assignee.
 func blockedReasonCommentBody(failureReason string) string {
-	safeReason := strings.ReplaceAll(failureReason, "mention://", "mention-blocked://")
+	safeReason := blockedCommentReasonReplacer.Replace(failureReason)
 	return fmt.Sprintf(
-		"Classified as `%s`.\n\n@-mention an agent on this card to resume - the run reassigns and the card returns to in-progress.",
+		"Classified as `%s`.\n\n@-mention an agent on this card to resume - it starts a new run and the card returns to in progress.",
 		safeReason,
 	)
 }
