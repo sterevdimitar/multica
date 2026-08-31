@@ -41,6 +41,17 @@ Go backend + monorepo frontend (pnpm workspaces + Turborepo) with shared package
 - Never add database foreign keys or cascading actions. Enforce relationships and perform dependent cleanup explicitly in the application layer, using transactions when the operation must be atomic.
 - Every index created by a migration, including unique indexes and indexes on new tables, must use `CREATE [UNIQUE] INDEX CONCURRENTLY`. Keep each concurrent index build in its own single-statement migration file.
 
+### Shipping work (hard rule)
+
+This is a **fork**, not the upstream repository. When work here is done, **commit and push it directly — do not open a pull request.** Push to the branch the work belongs on; for the webhook-runtime line that is `feature/webhook-runtime-v044`, which is the branch the deployed `backend:fork-webhook` image is built from.
+
+Pull requests are the convention in `dev-command-center`, not here. A fork PR adds a review surface nobody reads and delays the only step that actually ships a change, which is rebuilding the image and redeploying dev then prod by hand.
+
+Two things that follow from pushing straight to a shared deploy branch:
+
+- **Re-check the base immediately before pushing.** It moves. Run `git fetch` and diff against the remote branch, not against the commit you branched from — a stale base makes your push silently revert whatever landed while you worked.
+- **Verify before you push, not after.** There is no PR gate, so the push *is* the merge.
+
 ### Commands
 
 ```bash
