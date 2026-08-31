@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -1433,9 +1434,183 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// The comment is already saved; a blocked mention must not fail the whole
 	// request. Surface the per-target outcomes so the client can show partial
 	// success instead of a silent no-op (MUL-4525 §2).
-	resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, parentComment, authorType, authorID, originatorUserID, delegationAuthority, suppressAgentIDs)
+	//
+	// A control verb (/park, /resume, an unknown /word) is executed here
+	// instead of being routed to triggerTasksForComment: it produces its own
+	// side effect (or a reply comment) and MUST NOT also enqueue a task, the
+	// same way isNoteComment already keeps /note from enqueueing one. /note
+	// itself is NOT a control verb for this purpose - VerbNote falls through
+	// to the switch's default and takes the exact path it always has, so this
+	// deliberately does not touch upstream's /note handling. See ParseVerb's
+	// doc for why the grammars differ and stay unmerged.
+	verb, verbRest := service.ParseVerb(authorType, comment.Content)
+	switch verb {
+	case service.VerbPark, service.VerbResume, service.VerbUnknown:
+		resp.TriggerOutcomes = h.handleControlVerb(r.Context(), issue, comment, authorType, authorID, verb, verbRest)
+	default:
+		resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, parentComment, authorType, authorID, originatorUserID, delegationAuthority, suppressAgentIDs)
+	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// handleControlVerb executes a human's /park, /resume, or unknown control
+// verb instead of enqueueing a task for the comment that carried it. Every
+// branch returns nil trigger outcomes: the verb is fully consumed by its own
+// side effect (or a reply comment), never by an agent run, so there is
+// nothing to report back to the client the way an @mention's outcome would
+// be.
+//
+// A consumed verb creates no task, so there is no delivered_comment_ids row
+// to record a delivery receipt on - the mechanism the plan describes for
+// marking a comment "already handled" does not apply here. The actual replay
+// hazard (a later task completion on the same issue replaying this comment
+// through daemon.go's reconcileCommentsOnCompletion and dispatching an agent
+// after all) is closed at that function's own isNoteComment-style guard,
+// which now also checks ParseVerb - see the comment there.
+func (h *Handler) handleControlVerb(ctx context.Context, issue db.Issue, comment db.Comment, authorType, authorID string, verb service.Verb, reason string) []CommentTriggerOutcome {
+	switch verb {
+	case service.VerbPark:
+		h.parkIssueForComment(ctx, issue, comment, authorType, authorID, reason)
+	case service.VerbResume:
+		// Lifting a hold is what the ABSENCE of a hold means: nothing is
+		// written, nothing is posted. The comment itself, already stored
+		// above, is the entire effect - it is what makes the card
+		// unparked from here on, since nothing checks for a park anywhere
+		// except the (now consumed) presence of an unanswered /park.
+	case service.VerbUnknown:
+		h.postControlVerbAck(ctx, issue, authorType, authorID, unknownVerbAckBody())
+	}
+	return nil
+}
+
+// controlVerbReasonReplacer neutralises a /park reason before it is
+// interpolated into the ack comment. mention:// is defused so a reason that
+// quotes (or pastes) a mention link cannot dispatch an agent onto the card
+// the ack is announcing as just parked - the exact failure mode the ack
+// exists to prevent. Backticks and newlines are flattened so the reason
+// cannot break the ack's formatting or inject what reads like a second
+// paragraph. Mirrors blockedCommentReasonReplacer in
+// internal/service/issue_lifecycle.go; kept as a separate value because that
+// one scrubs a string bound for a markdown code span and this one does not,
+// so the two need not stay byte-identical.
+var controlVerbReasonReplacer = strings.NewReplacer(
+	"mention://", "mention-parked://",
+	"`", "'",
+	"\n", " ",
+	"\r", " ",
+)
+
+// parkAckBody renders the comment posted after a successful /park. It never
+// begins with "/" - even when reason is empty this starts with "Parked", not
+// a slash - so this comment, itself member- or agent-authored, can never be
+// misread as a control verb and let the system forge its own steering. reason
+// is the free text following /park in the human's comment (ParseVerb's
+// second return value); it is omitted entirely when blank, and neutralised
+// via controlVerbReasonReplacer when present.
+func parkAckBody(reason string) string {
+	if reason == "" {
+		return "Parked via /park.\n\nNothing runs on this card until you comment /resume or @-mention an agent. Comments are free while it is parked."
+	}
+	return fmt.Sprintf(
+		"Parked via /park: %s\n\nNothing runs on this card until you comment /resume or @-mention an agent. Comments are free while it is parked.",
+		controlVerbReasonReplacer.Replace(reason),
+	)
+}
+
+// unknownVerbAckBody renders the comment posted after an unrecognized /word
+// at position 0 of a human's comment. It names all three known verbs so a
+// typo doesn't leave the author guessing, and - like parkAckBody - never
+// begins with "/" even though it names verbs like /park mid-sentence.
+// ParseVerb discards the rest of an unknown verb's comment, so there is no
+// user-controlled text to neutralise here.
+func unknownVerbAckBody() string {
+	return "That looked like a control verb, but it is not one I know. The verbs are /park (stop the chain and put this card in front of you), /resume (lift the hold), and /note (leave context without triggering a run).\n\n" +
+		"Nothing ran. Re-comment with one of those, or comment normally to instruct the assigned agent."
+}
+
+// parkIssueForComment executes a human's /park: the card moves to in_review
+// and its assignee is cleared, in ONE statement
+// (UpdateIssueStatusAndUnassign) - a half-set (assignee_type, assignee_id)
+// pair is rejected with 400 by the API layer, so a two-write version is not
+// an option here. in_review is a judgement status this backend otherwise
+// never writes on its own; a human explicitly asking for the card to be put
+// in front of them is the one documented exception.
+//
+// The ack is posted only once this write has returned successfully, and by
+// construction that is also only once the assignee has been cleared - status
+// and assignee move together in the same statement, so there is no
+// intermediate state where one is true and not the other.
+// TestParkCommentPostsTheAckAfterUnassigning asserts this ordering directly
+// (via a BEFORE INSERT trigger on comment) rather than relying on that
+// argument.
+//
+// The ack is authored by the agent that WAS assigned, read from issue
+// BEFORE this call clears it - the party being taken off the card is the one
+// acknowledging it - or by the human who typed /park when nothing was
+// assigned.
+func (h *Handler) parkIssueForComment(ctx context.Context, issue db.Issue, comment db.Comment, authorType, authorID, reason string) {
+	wasAssigneeType := issue.AssigneeType.String
+	wasAssigneeID := issue.AssigneeID
+
+	updated, err := h.Queries.UpdateIssueStatusAndUnassign(ctx, db.UpdateIssueStatusAndUnassignParams{
+		ID:          issue.ID,
+		Status:      service.StatusInReview,
+		WorkspaceID: issue.WorkspaceID,
+	})
+	if err != nil {
+		slog.Warn("park comment: status write failed",
+			"issue_id", uuidToString(issue.ID), "comment_id", uuidToString(comment.ID), "error", err)
+		return
+	}
+
+	prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
+	h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), authorType, authorID, map[string]any{
+		"issue":              issueToResponse(updated, prefix),
+		"status_changed":     true,
+		"assignee_changed":   wasAssigneeType != "",
+		"prev_status":        issue.Status,
+		"prev_assignee_type": textToPtr(issue.AssigneeType),
+		"prev_assignee_id":   uuidToPtr(issue.AssigneeID),
+		"source":             "control_verb_park",
+	})
+
+	ackAuthorType, ackAuthorID := authorType, authorID
+	if wasAssigneeType == "agent" && wasAssigneeID.Valid {
+		ackAuthorType, ackAuthorID = "agent", uuidToString(wasAssigneeID)
+	}
+	h.postControlVerbAck(ctx, updated, ackAuthorType, ackAuthorID, parkAckBody(reason))
+}
+
+// postControlVerbAck stores a control-verb acknowledgement as an ordinary
+// comment and publishes it exactly like CreateComment publishes a
+// human-authored one, so it appears in the thread and over the realtime feed
+// without a second HTTP round trip. It is never routed back through
+// ParseVerb / triggerTasksForComment: parkAckBody and unknownVerbAckBody are
+// constructed so they never begin with "/", but this function does not rely
+// on that - it simply never calls the trigger path at all, so a caller
+// mistake in body construction could not resurrect the runaway either.
+func (h *Handler) postControlVerbAck(ctx context.Context, issue db.Issue, authorType, authorID, body string) {
+	ack, err := h.Queries.CreateComment(ctx, db.CreateCommentParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		AuthorType:  authorType,
+		AuthorID:    parseUUID(authorID),
+		Content:     body,
+		Type:        "comment",
+	})
+	if err != nil {
+		slog.Warn("control verb ack: post comment failed", "issue_id", uuidToString(issue.ID), "error", err)
+		return
+	}
+	resp := commentToResponse(ack, nil, nil)
+	h.publish(protocol.EventCommentCreated, uuidToString(issue.WorkspaceID), authorType, authorID, map[string]any{
+		"comment":             resp,
+		"issue_title":         issue.Title,
+		"issue_assignee_type": textToPtr(issue.AssigneeType),
+		"issue_assignee_id":   uuidToPtr(issue.AssigneeID),
+		"issue_status":        issue.Status,
+	})
 }
 
 // noteCommentPrefix marks a comment as a human-only note. A comment whose first
@@ -1456,13 +1631,34 @@ func isNoteComment(content string) bool {
 	return strings.EqualFold(firstToken, noteCommentPrefix)
 }
 
+// isConsumedControlVerbComment reports whether content is a control verb
+// this handler consumes entirely before a task would ever be enqueued for it
+// - /park, /resume, or an unrecognized /word (see handleControlVerb).
+// VerbNote and VerbNone are deliberately excluded: /note keeps running
+// through isNoteComment exactly as it did before this file knew about
+// control verbs at all, and an ordinary comment is, well, ordinary.
+//
+// This is checked at triggerTasksForComment below (the create/edit path) and
+// - the mandatory one - reconcileCommentsOnCompletion's replay loop in
+// daemon.go (see the guard there and TestConsumedVerbIsNotReplayedOnCompletion).
+// It is deliberately NOT duplicated inside computeCommentAgentTriggers or
+// retriggerCancelledTaskSurvivors; see the comment at each for why.
+func isConsumedControlVerbComment(authorType, content string) bool {
+	switch verb, _ := service.ParseVerb(authorType, content); verb {
+	case service.VerbPark, service.VerbResume, service.VerbUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // triggerTasksForComment resolves and enqueues the comment's agent triggers and
 // returns the per-target outcomes for explicit @agent / @squad mentions
 // (MUL-4525 §2): blocked mentions from resolution plus queued / coalesced /
 // deferred / blocked from enqueue. UI-suppressed triggers (the user unchecked
 // them) are removed before enqueue and produce no outcome.
 func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, comment db.Comment, parentComment *db.Comment, actorType, actorID, originatorUserID, delegationAuthorityUserID string, suppressAgentIDs []pgtype.UUID) []CommentTriggerOutcome {
-	if isNoteComment(comment.Content) {
+	if isNoteComment(comment.Content) || isConsumedControlVerbComment(actorType, comment.Content) {
 		return nil
 	}
 	triggers, targets := h.computeCommentAgentTriggers(ctx, issue, comment.Content, parentComment, actorType, actorID, commentTriggerComputeOptions{
@@ -1895,6 +2091,17 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 // — the implicit routing fallbacks (assignee, thread parent, conversation) were
 // never named by the user, so a no-route there is not a silent no-op.
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) ([]commentAgentTrigger, []commentMentionTarget) {
+	// NOTE: unlike triggerTasksForComment above, this does NOT also check
+	// isConsumedControlVerbComment. Every caller of this function
+	// (triggerTasksForComment, reconcileCommentsOnCompletion's replay loop in
+	// daemon.go, retriggerCancelledTaskSurvivors's replay loop below) already
+	// checks it before calling in - reconcileCommentsOnCompletion's check is
+	// the one this backend actually depends on to close the runaway replay
+	// hazard (see the guard in daemon.go), and duplicating the check here
+	// would silently satisfy that guard's job even with it removed, defeating
+	// the point of TestConsumedVerbIsNotReplayedOnCompletion proving it
+	// load-bearing. isNoteComment's presence here predates this task and is
+	// left as-is.
 	if isNoteComment(content) {
 		return nil, nil
 	}
@@ -2710,6 +2917,14 @@ func (h *Handler) retriggerCancelledTaskSurvivors(ctx context.Context, issue db.
 		if isNoteComment(comment.Content) {
 			continue
 		}
+		// No isConsumedControlVerbComment check here (unlike
+		// reconcileCommentsOnCompletion's replay loop in daemon.go): `comments`
+		// here is built entirely from cancelled tasks' own
+		// CoalescedCommentIds/TriggerCommentID (targetsByComment above). A
+		// control verb creates no task at all - see handleControlVerb - so it
+		// can never appear in any task's planned batch and can never reach
+		// this loop. Adding the check would be dead code, not defense in
+		// depth.
 		var parentComment *db.Comment
 		if comment.ParentID.Valid {
 			if parent, err := h.Queries.GetComment(ctx, comment.ParentID); err == nil {

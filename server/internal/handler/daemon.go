@@ -3093,6 +3093,33 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 		if isNoteComment(c.Content) {
 			continue
 		}
+		// A control verb (/park, /resume, an unknown /word) was consumed at
+		// create time without enqueueing a task - see
+		// (*Handler).handleControlVerb in comment.go. Because it created no
+		// task, it left no delivered_comment_ids row to be found "already
+		// delivered" above, so without this check it would sit here forever
+		// as an "undelivered" comment and get replayed - through the normal
+		// trigger path below - the instant any later task on this issue
+		// completes. That replay is exactly the unbounded-dispatch shape of
+		// the 2026-07-23 runaway, reached by a different route than a
+		// missing bookkeeping column: this is the actual mechanism that
+		// would re-fire it, which is why this guard, not a delivered-set
+		// entry, is what TestConsumedVerbIsNotReplayedOnCompletion pins.
+		// A control verb (/park, /resume, an unknown /word) was consumed at
+		// create time without enqueueing a task - see
+		// (*Handler).handleControlVerb in comment.go. Because it created no
+		// task, it left no delivered_comment_ids row to be found "already
+		// delivered" above, so without this check it would sit here forever
+		// as an "undelivered" comment and get replayed - through the normal
+		// trigger path below - the instant any later task on this issue
+		// completes. That replay is exactly the unbounded-dispatch shape of
+		// the 2026-07-23 runaway, reached by a different route than a
+		// missing bookkeeping column: this is the actual mechanism that
+		// would re-fire it, which is why this guard, not a delivered-set
+		// entry, is what TestConsumedVerbIsNotReplayedOnCompletion pins.
+		if isConsumedControlVerbComment(c.AuthorType, c.Content) {
+			continue
+		}
 		var parentComment *db.Comment
 		if c.ParentID.Valid {
 			// Scope to the issue's workspace; a comment's parent is always in the
