@@ -12,6 +12,42 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 )
 
+// createSteerVerbIssueWithStatus is createSteerVerbIssue with a caller-chosen
+// starting status, for F4's "/park on a done card" pin - every other
+// lifecycle writer refuses done/cancelled/in_review via MayPromoteToRunning,
+// but parkIssueForComment deliberately does not, so a test needs to start
+// from a non-default status to observe that.
+func createSteerVerbIssueWithStatus(t *testing.T, title, agentID, status string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	var number int
+	if err := testPool.QueryRow(ctx, `
+		UPDATE workspace
+		SET issue_counter = GREATEST(issue_counter, (SELECT COALESCE(MAX(number), 0) FROM issue WHERE workspace_id = $1)) + 1
+		WHERE id = $1 RETURNING issue_counter
+	`, testWorkspaceID).Scan(&number); err != nil {
+		t.Fatalf("next issue number: %v", err)
+	}
+
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, creator_type, creator_id, title, status, priority, assignee_type, assignee_id, number)
+		VALUES ($1, 'member', $2, $3, $4, 'none', 'agent', $5, $6)
+		RETURNING id
+	`, testWorkspaceID, testUserID, title, status, agentID, number).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+		testPool.Exec(context.Background(), `DELETE FROM comment WHERE issue_id = $1`, issueID)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	return issueID
+}
+
 // createSteerVerbIssue creates an issue in in_progress assigned to agentID
 // (agent assignment lets a plain member comment route via the assignee
 // fallback, and lets /park's assignee-clear be observable). Cleanup mirrors
@@ -155,6 +191,39 @@ func quoteLiteralForTest(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// TestParkAckBodyInvariants is F5's table test pinning parkAckBody's two
+// hard invariants directly, with no database needed. Before this test,
+// "never begins with /" was asserted only for the unknown-verb ack, and "no
+// mention://" was covered only transitively by
+// TestConsumedVerbIsNotReplayedOnCompletion - which fails if EITHER the
+// daemon.go guard or controlVerbReasonReplacer's neutralisation regresses,
+// so it cannot localise which one broke.
+func TestParkAckBodyInvariants(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+	}{
+		{"empty", ""},
+		{"whitespace only", "   "},
+		{"reason is itself a slash command", "/park"},
+		{"full markdown mention link", "[@A](mention://agent/11111111-1111-1111-1111-111111111111)"},
+		{"backticks", "see `main.go` for context"},
+		{"embedded newlines", "line one\nline two\r\nline three"},
+		{"very long reason", strings.Repeat("a very long reason that keeps going ", 200)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := parkAckBody(tc.reason)
+			if strings.HasPrefix(body, "/") {
+				t.Errorf("parkAckBody(%q) = %q, begins with /", tc.reason, body)
+			}
+			if strings.Contains(body, "mention://") {
+				t.Errorf("parkAckBody(%q) = %q, contains mention://", tc.reason, body)
+			}
+		})
+	}
+}
+
 func TestParkCommentEnqueuesNoTask(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -214,6 +283,113 @@ func TestParkCommentPostsTheAckAfterUnassigning(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("comment count = %d, want 2 (the /park comment plus its ack, proving the ack landed after the assignee was cleared)", count)
+	}
+}
+
+// TestParkOnDoneCardMovesToInReview pins F4's deliberate decision: unlike
+// every other lifecycle writer (which consults service.MayPromoteToRunning
+// and refuses done/cancelled/in_review), /park applies no status guard at
+// all. A human's explicit /park on a done card moves it to in_review and
+// clears the assignee - the documented way (AGENTS.md) to pull a card out of
+// done and stop a merge - so this must NOT change to a no-op if a guard is
+// added later by accident.
+func TestParkOnDoneCardMovesToInReview(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	agentID := createHandlerTestAgent(t, "Park Done Agent", nil)
+	issueID := createSteerVerbIssueWithStatus(t, "park on done card", agentID, service.StatusDone)
+
+	postSteerComment(t, issueID, "/park pulling this back for review")
+
+	status, assigneeType, assigneeID := loadIssueAssigneeAndStatus(t, issueID)
+	if status != service.StatusInReview {
+		t.Errorf("status = %q, want %q (park must move a done card to in_review, unguarded)", status, service.StatusInReview)
+	}
+	if assigneeType != nil {
+		t.Errorf("assignee_type = %v, want NULL", *assigneeType)
+	}
+	if assigneeID != nil {
+		t.Errorf("assignee_id = %v, want NULL", *assigneeID)
+	}
+}
+
+// TestParkOnUnassignedCardParksWithoutError covers F5's named untested
+// behaviour: /park on a card with no assignee at all. parkIssueForComment
+// must still move the card to in_review and post an ack authored by the
+// human who typed /park (there is no assignee to attribute it to instead).
+func TestParkOnUnassignedCardParksWithoutError(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	var number int
+	if err := testPool.QueryRow(ctx, `
+		UPDATE workspace
+		SET issue_counter = GREATEST(issue_counter, (SELECT COALESCE(MAX(number), 0) FROM issue WHERE workspace_id = $1)) + 1
+		WHERE id = $1 RETURNING issue_counter
+	`, testWorkspaceID).Scan(&number); err != nil {
+		t.Fatalf("next issue number: %v", err)
+	}
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, creator_type, creator_id, title, status, priority, number)
+		VALUES ($1, 'member', $2, 'park unassigned card', 'in_progress', 'none', $3)
+		RETURNING id
+	`, testWorkspaceID, testUserID, number).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM comment WHERE issue_id = $1`, issueID)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	postSteerComment(t, issueID, "/park nobody was on this anyway")
+
+	status, assigneeType, assigneeID := loadIssueAssigneeAndStatus(t, issueID)
+	if status != service.StatusInReview {
+		t.Errorf("status = %q, want %q", status, service.StatusInReview)
+	}
+	if assigneeType != nil || assigneeID != nil {
+		t.Errorf("assignee = (%v, %v), want still NULL", assigneeType, assigneeID)
+	}
+
+	var authorType, ackContent string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT author_type, content FROM comment WHERE issue_id = $1 ORDER BY created_at DESC LIMIT 1`, issueID).
+		Scan(&authorType, &ackContent); err != nil {
+		t.Fatalf("load ack comment: %v", err)
+	}
+	if authorType != "member" {
+		t.Errorf("ack author_type = %q, want %q (no prior assignee, so the ack is authored by the human who typed /park)", authorType, "member")
+	}
+	if strings.HasPrefix(ackContent, "/") {
+		t.Fatalf("ack begins with %q, must never begin with /", ackContent[:1])
+	}
+}
+
+// TestParkAckAuthoredByFormerAssigneeAgent covers F5's other named untested
+// behaviour: when an agent WAS assigned, the ack is authored by that agent
+// (read from the issue snapshot before the clear), not by the human who
+// typed /park.
+func TestParkAckAuthoredByFormerAssigneeAgent(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	agentID := createHandlerTestAgent(t, "Park Ack Author Agent", nil)
+	issueID := createSteerVerbIssue(t, "park ack authored by former assignee", agentID)
+
+	postSteerComment(t, issueID, "/park handing this back")
+
+	var authorType, authorID string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT author_type, author_id FROM comment WHERE issue_id = $1 ORDER BY created_at DESC LIMIT 1`, issueID).
+		Scan(&authorType, &authorID); err != nil {
+		t.Fatalf("load ack comment: %v", err)
+	}
+	if authorType != "agent" || authorID != agentID {
+		t.Errorf("ack author = (%q, %q), want (\"agent\", %q) — the formerly assigned agent", authorType, authorID, agentID)
 	}
 }
 
@@ -387,6 +563,30 @@ func TestConsumedVerbIsNotReplayedOnCompletion(t *testing.T) {
 
 	if n := pendingTaskCountForAgentIssue(t, issueID, agentID); n != 0 {
 		t.Fatalf("follow-up tasks scheduled by reconcile after /park = %d, want 0 (the /park comment must not be replayed)", n)
+	}
+}
+
+// TestParkWithMentionPreviewsNoTriggers pins F3's fix: PreviewCommentTriggers
+// must not preview an agent trigger for a comment that CreateComment will
+// consume entirely as a control verb. Before this fix, "/park stop,
+// @Agent" previewed "will trigger @Agent" (the mention resolves fine on its
+// own) even though handleControlVerb intercepts the comment before
+// triggerTasksForComment - and thus before that mention - is ever reached,
+// so submit triggered nothing. That is the preview/side-effect divergence
+// this file already documents ten lines above PreviewCommentTriggers's own
+// mention handling.
+func TestParkWithMentionPreviewsNoTriggers(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	agentID := createHandlerTestAgent(t, "Preview Park Agent", nil)
+	issueID := createSteerVerbIssue(t, "park with mention previews no triggers", agentID)
+
+	content := fmt.Sprintf("/park stop, [@Agent](mention://agent/%s)", agentID)
+	preview := previewCommentTriggersForTest(t, issueID, CommentTriggerPreviewRequest{Content: content})
+
+	if len(preview.Agents) != 0 {
+		t.Fatalf("preview agents for consumed /park = %+v, want none", preview.Agents)
 	}
 }
 

@@ -1203,6 +1203,30 @@ func (h *Handler) PreviewCommentTriggers(w http.ResponseWriter, r *http.Request)
 	}
 
 	actorType, actorID := h.resolveActor(r, userID, uuidToString(issue.WorkspaceID))
+
+	// Guard at THIS entry point, not inside computeCommentAgentTriggers: a
+	// control verb (/park, /resume, an unknown /word) is fully consumed by
+	// CreateComment's handleControlVerb and never reaches
+	// triggerTasksForComment, so previewing it as "will trigger @Agent" is a
+	// preview/side-effect divergence of the exact kind called out ten lines
+	// up (GH #5388) - typing "/park stop, @Agent" would preview a trigger
+	// that submit then never fires, because the verb consumes the whole
+	// comment before any mention is ever considered. isNoteComment does not
+	// need the same treatment because it is checked INSIDE
+	// computeCommentAgentTriggers, so /note already previews correctly.
+	//
+	// This must stay at the call site and never move inside
+	// computeCommentAgentTriggers: that function is also called from
+	// daemon.go's reconcileCommentsOnCompletion, whose OWN
+	// isConsumedControlVerbComment guard is the one
+	// TestConsumedVerbIsNotReplayedOnCompletion pins as load-bearing. Adding
+	// the check inside computeCommentAgentTriggers would shadow that guard -
+	// the test would keep passing even if the daemon.go guard were deleted.
+	if isConsumedControlVerbComment(actorType, content) {
+		writeJSON(w, http.StatusOK, CommentTriggerPreviewResponse{Agents: []CommentTriggerAgentResponse{}})
+		return
+	}
+
 	opts.OriginatorUserID = h.invokeOriginatorFromRequest(r, actorType, actorID)
 	opts.AutopilotDelegationAuthorityUserID = h.autopilotDelegationAuthorityFromRequest(r, issue, actorType, actorID)
 	triggers, targets := h.computeCommentAgentTriggers(r.Context(), issue, content, parentComment, actorType, actorID, opts)
@@ -1446,7 +1470,8 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	verb, verbRest := service.ParseVerb(authorType, comment.Content)
 	switch verb {
 	case service.VerbPark, service.VerbResume, service.VerbUnknown:
-		resp.TriggerOutcomes = h.handleControlVerb(r.Context(), issue, comment, authorType, authorID, verb, verbRest)
+		h.handleControlVerb(r.Context(), issue, comment, authorType, authorID, verb, verbRest)
+		resp.TriggerOutcomes = nil
 	default:
 		resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, parentComment, authorType, authorID, originatorUserID, delegationAuthority, suppressAgentIDs)
 	}
@@ -1455,20 +1480,17 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleControlVerb executes a human's /park, /resume, or unknown control
-// verb instead of enqueueing a task for the comment that carried it. Every
-// branch returns nil trigger outcomes: the verb is fully consumed by its own
-// side effect (or a reply comment), never by an agent run, so there is
-// nothing to report back to the client the way an @mention's outcome would
-// be.
+// verb instead of enqueueing a task for the comment that carried it. The
+// verb is fully consumed by its own side effect (or a reply comment), never
+// by an agent run, so there are never any trigger outcomes to report back to
+// the client the way an @mention's outcome would be - the caller sets
+// resp.TriggerOutcomes = nil itself rather than taking a return value from
+// here.
 //
-// A consumed verb creates no task, so there is no delivered_comment_ids row
-// to record a delivery receipt on - the mechanism the plan describes for
-// marking a comment "already handled" does not apply here. The actual replay
-// hazard (a later task completion on the same issue replaying this comment
-// through daemon.go's reconcileCommentsOnCompletion and dispatching an agent
-// after all) is closed at that function's own isNoteComment-style guard,
-// which now also checks ParseVerb - see the comment there.
-func (h *Handler) handleControlVerb(ctx context.Context, issue db.Issue, comment db.Comment, authorType, authorID string, verb service.Verb, reason string) []CommentTriggerOutcome {
+// A consumed verb creates no task and so no delivered_comment_ids row; the
+// resulting replay hazard and where it is actually closed is documented at
+// the guard in daemon.go's reconcileCommentsOnCompletion.
+func (h *Handler) handleControlVerb(ctx context.Context, issue db.Issue, comment db.Comment, authorType, authorID string, verb service.Verb, reason string) {
 	switch verb {
 	case service.VerbPark:
 		h.parkIssueForComment(ctx, issue, comment, authorType, authorID, reason)
@@ -1481,7 +1503,6 @@ func (h *Handler) handleControlVerb(ctx context.Context, issue db.Issue, comment
 	case service.VerbUnknown:
 		h.postControlVerbAck(ctx, issue, authorType, authorID, unknownVerbAckBody())
 	}
-	return nil
 }
 
 // controlVerbReasonReplacer neutralises a /park reason before it is
@@ -1494,6 +1515,13 @@ func (h *Handler) handleControlVerb(ctx context.Context, issue db.Issue, comment
 // internal/service/issue_lifecycle.go; kept as a separate value because that
 // one scrubs a string bound for a markdown code span and this one does not,
 // so the two need not stay byte-identical.
+//
+// This neutralisation is safe only because util.MentionRe is case-sensitive:
+// the replacer's literal "mention://" match leaves "MENTION://" untouched,
+// but MentionRe also only matches lowercase "mention://", so the survivor is
+// inert either way. If MentionRe is ever made case-insensitive, this
+// replacer silently stops covering every case variant and needs the same
+// treatment.
 var controlVerbReasonReplacer = strings.NewReplacer(
 	"mention://", "mention-parked://",
 	"`", "'",
@@ -1549,7 +1577,25 @@ func unknownVerbAckBody() string {
 // BEFORE this call clears it - the party being taken off the card is the one
 // acknowledging it - or by the human who typed /park when nothing was
 // assigned.
+//
+// Deliberately NO status guard: unlike every other lifecycle writer in this
+// backend (which consults service.MayPromoteToRunning and refuses to touch a
+// done/cancelled/in_review card), this runs on a done card too, moving it to
+// in_review and clearing the assignee. That allow-list exists to stop an
+// AUTOMATED writer - a dispatch, a task failure - from clobbering a human's
+// decision. /park is not an automated writer; it IS the human's decision.
+// AGENTS.md already documents dragging a card out of done as how you stop a
+// merge, so a human's explicit /park doing the same thing is the documented
+// behaviour, not a bug a guard should prevent. TestParkOnDoneCardMovesToInReview
+// pins this so it cannot regress into a guard by accident.
 func (h *Handler) parkIssueForComment(ctx context.Context, issue db.Issue, comment db.Comment, authorType, authorID, reason string) {
+	// Reads the assignee from the `issue` snapshot loaded at the top of
+	// CreateComment, rather than re-fetching via GetIssue the way
+	// MarkIssueBlocked does (internal/service/issue_lifecycle.go) for
+	// staleness safety across its longer async lifecycle. That re-read
+	// doesn't apply here: this runs synchronously inside the same
+	// CreateComment request that loaded the snapshot, so there is no window
+	// for the assignee to have moved between load and use.
 	wasAssigneeType := issue.AssigneeType.String
 	wasAssigneeID := issue.AssigneeID
 
@@ -1566,13 +1612,17 @@ func (h *Handler) parkIssueForComment(ctx context.Context, issue db.Issue, comme
 
 	prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
 	h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), authorType, authorID, map[string]any{
-		"issue":              issueToResponse(updated, prefix),
-		"status_changed":     true,
+		"issue": issueToResponse(updated, prefix),
+		// Computed, not hardcoded: /park on a card already in_review (e.g. a
+		// second /park before anyone resumes it) is a real status_changed=false
+		// case, and issue.go:~2735 computes it the same way for every other
+		// status writer - hardcoding true here produced a bogus
+		// in_review -> in_review activity row.
+		"status_changed":     issue.Status != updated.Status,
 		"assignee_changed":   wasAssigneeType != "",
 		"prev_status":        issue.Status,
 		"prev_assignee_type": textToPtr(issue.AssigneeType),
 		"prev_assignee_id":   uuidToPtr(issue.AssigneeID),
-		"source":             "control_verb_park",
 	})
 
 	ackAuthorType, ackAuthorID := authorType, authorID
@@ -1638,11 +1688,12 @@ func isNoteComment(content string) bool {
 // through isNoteComment exactly as it did before this file knew about
 // control verbs at all, and an ordinary comment is, well, ordinary.
 //
-// This is checked at triggerTasksForComment below (the create/edit path) and
-// - the mandatory one - reconcileCommentsOnCompletion's replay loop in
-// daemon.go (see the guard there and TestConsumedVerbIsNotReplayedOnCompletion).
-// It is deliberately NOT duplicated inside computeCommentAgentTriggers or
-// retriggerCancelledTaskSurvivors; see the comment at each for why.
+// Checked at each call site that needs it (triggerTasksForComment and
+// PreviewCommentTriggers, both below) rather than inside
+// computeCommentAgentTriggers itself; the full reasoning, including which
+// call site is the one the tests actually pin, lives at
+// computeCommentAgentTriggers's own NOTE and at the guard in daemon.go's
+// reconcileCommentsOnCompletion.
 func isConsumedControlVerbComment(authorType, content string) bool {
 	switch verb, _ := service.ParseVerb(authorType, content); verb {
 	case service.VerbPark, service.VerbResume, service.VerbUnknown:
@@ -2091,16 +2142,32 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 // — the implicit routing fallbacks (assignee, thread parent, conversation) were
 // never named by the user, so a no-route there is not a silent no-op.
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) ([]commentAgentTrigger, []commentMentionTarget) {
-	// NOTE: unlike triggerTasksForComment above, this does NOT also check
-	// isConsumedControlVerbComment. Every caller of this function
-	// (triggerTasksForComment, reconcileCommentsOnCompletion's replay loop in
-	// daemon.go, retriggerCancelledTaskSurvivors's replay loop below) already
-	// checks it before calling in - reconcileCommentsOnCompletion's check is
-	// the one this backend actually depends on to close the runaway replay
-	// hazard (see the guard in daemon.go), and duplicating the check here
-	// would silently satisfy that guard's job even with it removed, defeating
-	// the point of TestConsumedVerbIsNotReplayedOnCompletion proving it
-	// load-bearing. isNoteComment's presence here predates this task and is
+	// NOTE: this does NOT also check isConsumedControlVerbComment. The real
+	// callers, and why each is safe without a check here:
+	//   - triggerTasksForComment (create/edit path): guards at its own entry
+	//     point, above.
+	//   - PreviewCommentTriggers: guards at its own entry point (read-only;
+	//     never enqueues, but must not preview a trigger the create path
+	//     would then consume - see the comment there).
+	//   - reconcileCommentsOnCompletion's replay loop in daemon.go: this is
+	//     the ONE guard this backend actually depends on to close the
+	//     runaway replay hazard (see the guard there and
+	//     TestConsumedVerbIsNotReplayedOnCompletion).
+	//   - retriggerCancelledTaskSurvivors's replay loop below: does NOT
+	//     check, but not because it trusts a caller-side guard - it is
+	//     unreachable by construction. Its comment set is built only from
+	//     cancelled tasks' own TriggerCommentID/CoalescedCommentIds, and a
+	//     consumed control verb never creates a task, so it can never appear
+	//     there in the first place. See the comment at that loop.
+	//
+	// Mutation obligation for whoever touches this next: the guard that
+	// TestConsumedVerbIsNotReplayedOnCompletion actually pins is the one in
+	// daemon.go (reconcileCommentsOnCompletion), not this function. Remove
+	// THAT guard and the test must fail. Adding a guard INSIDE
+	// computeCommentAgentTriggers instead would shadow it: the test would
+	// keep passing even with the daemon.go guard deleted, which would falsely
+	// certify the daemon.go guard as load-bearing when it no longer is.
+	// isNoteComment's presence here predates this task and is
 	// left as-is.
 	if isNoteComment(content) {
 		return nil, nil
@@ -2720,6 +2787,21 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update comment")
 		return
 	}
+	// KNOWN GAP (not implemented; outside this task's spec, which named
+	// CreateComment only, but reachable in production): this edit path has
+	// no control-verb awareness of its own.
+	//   - Editing an ORDINARY comment INTO "/park ..." cancels the
+	//     previously-triggered tasks (CancelTasksByTriggerComment above) and
+	//     retriggerEditedComment's call to triggerTasksForComment correctly
+	//     suppresses re-trigger (isConsumedControlVerbComment), but nothing
+	//     here calls parkIssueForComment or posts an ack - the card is never
+	//     actually parked despite the comment now reading like a park.
+	//   - Editing a "/park ..." comment INTO ordinary text leaves the card
+	//     parked (parkIssueForComment already ran at create time and nothing
+	//     here reverts it) while now enqueueing a task against a parked card.
+	// Fixing either requires deciding what "editing into/out of a control
+	// verb" should mean product-wise, which is a design decision, not a bug
+	// fix - left as a recorded gap rather than an accident.
 	retriggerEditedComment := func() []CommentTriggerOutcome {
 		if oldContent == comment.Content {
 			return nil
