@@ -84,6 +84,20 @@ func MayPromoteToRunning(currentStatus string) bool {
 	return promotableStatuses[currentStatus]
 }
 
+// promotableStatusList is promotableStatuses' keys, flattened once into the
+// slice shape the guarded UPDATE queries need for their ANY($n::text[])
+// predicate. Derived from the map (not hand-written) so there is exactly one
+// source of truth for which statuses MarkIssueRunning/MarkIssueBlocked may
+// touch - see promotableStatuses' own comment for why that list is what it
+// is.
+var promotableStatusList = func() []string {
+	statuses := make([]string, 0, len(promotableStatuses))
+	for status := range promotableStatuses {
+		statuses = append(statuses, status)
+	}
+	return statuses
+}()
+
 // MarkIssueRunning writes the starting status for a dispatched task's issue.
 // Best-effort: every write failure is logged and swallowed, and a refusal by
 // the guard below is logged too (at Info, since it is an expected outcome,
@@ -110,12 +124,27 @@ func (s *TaskService) MarkIssueRunning(ctx context.Context, issue db.Issue, agen
 	}
 	prevStatus := current.Status
 	newStatus := RunStartStatus(agentName)
-	updated, err := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
-		ID:          current.ID,
-		Status:      newStatus,
-		WorkspaceID: current.WorkspaceID,
+	// Guarded write: the Go check above only proves the status was
+	// promotable at the moment of the GetIssue read. Re-evaluating the same
+	// predicate in the UPDATE's WHERE clause closes the window between that
+	// read and this write - see UpdateIssueStatusIfCurrent for the race this
+	// closes and why a no-rows result here means the race actually fired
+	// rather than that something went wrong.
+	updated, err := s.Queries.UpdateIssueStatusIfCurrent(ctx, db.UpdateIssueStatusIfCurrentParams{
+		ID:              current.ID,
+		Status:          newStatus,
+		WorkspaceID:     current.WorkspaceID,
+		CurrentStatuses: promotableStatusList,
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Info("lifecycle: run-start status race detected, status changed since read",
+				"issue_id", util.UUIDToString(current.ID),
+				"read_status", prevStatus,
+				"attempted_status", newStatus,
+				"agent_name", agentName)
+			return
+		}
 		slog.Error("lifecycle: write run-start status", "err", err,
 			"issue_id", util.UUIDToString(current.ID),
 			"workspace_id", util.UUIDToString(current.WorkspaceID),
@@ -189,12 +218,27 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 		return
 	}
 	prevStatus := current.Status
-	updated, err := s.Queries.UpdateIssueStatusAndUnassign(ctx, db.UpdateIssueStatusAndUnassignParams{
-		ID:          current.ID,
-		Status:      StatusBlocked,
-		WorkspaceID: current.WorkspaceID,
+	// Guarded write: same rationale as MarkIssueRunning's guarded write
+	// above - the Go check only proves the status was promotable at the
+	// GetIssue read, and re-checking it in the UPDATE's WHERE clause is what
+	// stops a 'done' written in the window between that read and this write
+	// (a task failing after its PR already merged) from being clobbered back
+	// to blocked.
+	updated, err := s.Queries.UpdateIssueStatusAndUnassignIfCurrent(ctx, db.UpdateIssueStatusAndUnassignIfCurrentParams{
+		ID:              current.ID,
+		Status:          StatusBlocked,
+		WorkspaceID:     current.WorkspaceID,
+		CurrentStatuses: promotableStatusList,
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Info("lifecycle: blocked status race detected, status changed since read",
+				"issue_id", util.UUIDToString(current.ID),
+				"read_status", prevStatus,
+				"attempted_status", StatusBlocked,
+				"failure_reason", failureReason)
+			return
+		}
 		slog.Error("lifecycle: write blocked status", "err", err,
 			"issue_id", util.UUIDToString(current.ID),
 			"workspace_id", util.UUIDToString(current.WorkspaceID),
@@ -289,7 +333,12 @@ func (s *TaskService) MarkIssueNotRunning(ctx context.Context, issueID pgtype.UU
 		return
 	}
 	// Concurrent-agent guard: don't return the card if another agent still
-	// has a live task on it. See the docstring above.
+	// has a live task on it. See the docstring above. This Go-side check
+	// remains a fast path only - it produces the "other task still active"
+	// log line on the common refusal case without a write round-trip - but
+	// it is not the authority: the guarded write below re-checks both this
+	// and the status guard atomically, since either fact can change in the
+	// window between this read and that write.
 	hasActive, err := s.Queries.HasActiveTaskForIssue(ctx, current.ID)
 	if err != nil {
 		slog.Error("lifecycle: active-task check for not-running status", "err", err, "issue_id", util.UUIDToString(current.ID), "cause", cause)
@@ -300,12 +349,27 @@ func (s *TaskService) MarkIssueNotRunning(ctx context.Context, issueID pgtype.UU
 		return
 	}
 	prevStatus := current.Status
-	updated, err := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
-		ID:          current.ID,
-		Status:      StatusTodo,
-		WorkspaceID: current.WorkspaceID,
+	// Guarded write: folds both TOCTOU races (the status guard above, and
+	// the concurrent-agent guard just re-checked in Go) into one statement
+	// via UpdateIssueStatusIfCurrentAndInactive's NOT EXISTS clause. The
+	// permitted-statuses list is exactly {in_progress} - this writer's guard
+	// is deliberately narrower than promotableStatuses; see the docstring
+	// above for why.
+	updated, err := s.Queries.UpdateIssueStatusIfCurrentAndInactive(ctx, db.UpdateIssueStatusIfCurrentAndInactiveParams{
+		ID:              current.ID,
+		Status:          StatusTodo,
+		WorkspaceID:     current.WorkspaceID,
+		CurrentStatuses: []string{StatusInProgress},
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Info("lifecycle: not-running status race detected, status changed or another task became active since read",
+				"issue_id", util.UUIDToString(current.ID),
+				"read_status", prevStatus,
+				"attempted_status", StatusTodo,
+				"cause", cause)
+			return
+		}
 		slog.Error("lifecycle: write not-running status", "err", err,
 			"issue_id", util.UUIDToString(current.ID),
 			"workspace_id", util.UUIDToString(current.WorkspaceID),

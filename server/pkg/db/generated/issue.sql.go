@@ -1549,3 +1549,198 @@ func (q *Queries) UpdateIssueStatusAndUnassign(ctx context.Context, arg UpdateIs
 	)
 	return i, err
 }
+
+const updateIssueStatusAndUnassignIfCurrent = `-- name: UpdateIssueStatusAndUnassignIfCurrent :one
+UPDATE issue SET
+    status = $2,
+    assignee_type = NULL,
+    assignee_id = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3 AND status = ANY($4::text[])
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
+`
+
+type UpdateIssueStatusAndUnassignIfCurrentParams struct {
+	ID              pgtype.UUID `json:"id"`
+	Status          string      `json:"status"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	CurrentStatuses []string    `json:"current_statuses"`
+}
+
+// Guarded variant of UpdateIssueStatusAndUnassign - see UpdateIssueStatusIfCurrent
+// above for the race it closes and how to interpret a no-rows result. current_statuses is
+// the caller's permitted-current-statuses list.
+func (q *Queries) UpdateIssueStatusAndUnassignIfCurrent(ctx context.Context, arg UpdateIssueStatusAndUnassignIfCurrentParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueStatusAndUnassignIfCurrent,
+		arg.ID,
+		arg.Status,
+		arg.WorkspaceID,
+		arg.CurrentStatuses,
+	)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+	)
+	return i, err
+}
+
+const updateIssueStatusIfCurrent = `-- name: UpdateIssueStatusIfCurrent :one
+UPDATE issue SET
+    status = $2,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3 AND status = ANY($4::text[])
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
+`
+
+type UpdateIssueStatusIfCurrentParams struct {
+	ID              pgtype.UUID `json:"id"`
+	Status          string      `json:"status"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	CurrentStatuses []string    `json:"current_statuses"`
+}
+
+// Guarded variant of UpdateIssueStatus. The lifecycle writers in
+// issue_lifecycle.go (MarkIssueRunning, MarkIssueBlocked) used to read the
+// issue's status in Go, check it against MayPromoteToRunning, and only then
+// issue an unconditional UpdateIssueStatus - a check-then-write gap in which
+// another writer could change the status (most importantly, a human or the
+// readiness gate writing 'done' to trigger a merge) and have this write land
+// anyway, silently clobbering it. Moving the predicate into the WHERE clause
+// makes the database evaluate it atomically with the write instead: current_statuses is
+// the caller's permitted-current-statuses list (e.g. promotableStatuses), and
+// the row only updates if its status is still one of them at write time. When
+// the status has moved outside that set since the caller's read, this matches
+// no row - sqlc surfaces that as pgx.ErrNoRows for a :one query, and callers
+// must treat it as the race having fired, not as a hard failure.
+func (q *Queries) UpdateIssueStatusIfCurrent(ctx context.Context, arg UpdateIssueStatusIfCurrentParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueStatusIfCurrent,
+		arg.ID,
+		arg.Status,
+		arg.WorkspaceID,
+		arg.CurrentStatuses,
+	)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+	)
+	return i, err
+}
+
+const updateIssueStatusIfCurrentAndInactive = `-- name: UpdateIssueStatusIfCurrentAndInactive :one
+UPDATE issue SET
+    status = $2,
+    updated_at = now()
+WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY($4::text[])
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_task_queue atq
+      WHERE atq.issue_id = $1 AND atq.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+  )
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
+`
+
+type UpdateIssueStatusIfCurrentAndInactiveParams struct {
+	ID              pgtype.UUID `json:"id"`
+	Status          string      `json:"status"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	CurrentStatuses []string    `json:"current_statuses"`
+}
+
+// Guarded variant used only by MarkIssueNotRunning, folding its two
+// check-then-write races into one statement: the status guard (see
+// UpdateIssueStatusIfCurrent - current_statuses is the permitted-current-statuses list,
+// narrower here since MarkIssueNotRunning only ever undoes its own
+// in_progress write) and the concurrent-agent guard that used to be a
+// separate HasActiveTaskForIssue call before this write. The NOT EXISTS
+// clause mirrors HasActiveTaskForIssue's own status list (agent.sql) -
+// keep them in sync if that list ever changes. As with the other guarded
+// queries, matching no row means the race fired (either the status moved, or
+// another agent's task became active) and must be logged, not treated as an
+// error.
+func (q *Queries) UpdateIssueStatusIfCurrentAndInactive(ctx context.Context, arg UpdateIssueStatusIfCurrentAndInactiveParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueStatusIfCurrentAndInactive,
+		arg.ID,
+		arg.Status,
+		arg.WorkspaceID,
+		arg.CurrentStatuses,
+	)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+	)
+	return i, err
+}

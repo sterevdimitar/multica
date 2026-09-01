@@ -138,6 +138,60 @@ UPDATE issue SET
 WHERE id = $1 AND workspace_id = $3
 RETURNING *;
 
+-- name: UpdateIssueStatusIfCurrent :one
+-- Guarded variant of UpdateIssueStatus. The lifecycle writers in
+-- issue_lifecycle.go (MarkIssueRunning, MarkIssueBlocked) used to read the
+-- issue's status in Go, check it against MayPromoteToRunning, and only then
+-- issue an unconditional UpdateIssueStatus - a check-then-write gap in which
+-- another writer could change the status (most importantly, a human or the
+-- readiness gate writing 'done' to trigger a merge) and have this write land
+-- anyway, silently clobbering it. Moving the predicate into the WHERE clause
+-- makes the database evaluate it atomically with the write instead: current_statuses is
+-- the caller's permitted-current-statuses list (e.g. promotableStatuses), and
+-- the row only updates if its status is still one of them at write time. When
+-- the status has moved outside that set since the caller's read, this matches
+-- no row - sqlc surfaces that as pgx.ErrNoRows for a :one query, and callers
+-- must treat it as the race having fired, not as a hard failure.
+UPDATE issue SET
+    status = $2,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3 AND status = ANY(sqlc.arg(current_statuses)::text[])
+RETURNING *;
+
+-- name: UpdateIssueStatusAndUnassignIfCurrent :one
+-- Guarded variant of UpdateIssueStatusAndUnassign - see UpdateIssueStatusIfCurrent
+-- above for the race it closes and how to interpret a no-rows result. current_statuses is
+-- the caller's permitted-current-statuses list.
+UPDATE issue SET
+    status = $2,
+    assignee_type = NULL,
+    assignee_id = NULL,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $3 AND status = ANY(sqlc.arg(current_statuses)::text[])
+RETURNING *;
+
+-- name: UpdateIssueStatusIfCurrentAndInactive :one
+-- Guarded variant used only by MarkIssueNotRunning, folding its two
+-- check-then-write races into one statement: the status guard (see
+-- UpdateIssueStatusIfCurrent - current_statuses is the permitted-current-statuses list,
+-- narrower here since MarkIssueNotRunning only ever undoes its own
+-- in_progress write) and the concurrent-agent guard that used to be a
+-- separate HasActiveTaskForIssue call before this write. The NOT EXISTS
+-- clause mirrors HasActiveTaskForIssue's own status list (agent.sql) -
+-- keep them in sync if that list ever changes. As with the other guarded
+-- queries, matching no row means the race fired (either the status moved, or
+-- another agent's task became active) and must be logged, not treated as an
+-- error.
+UPDATE issue SET
+    status = $2,
+    updated_at = now()
+WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY(sqlc.arg(current_statuses)::text[])
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_task_queue atq
+      WHERE atq.issue_id = $1 AND atq.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+  )
+RETURNING *;
+
 -- name: CreateIssueWithOrigin :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,

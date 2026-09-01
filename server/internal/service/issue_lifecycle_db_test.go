@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -888,4 +891,253 @@ func TestCancelTasksForAgentKeepsTheAssignee(t *testing.T) {
 	if assigneeType != "agent" || !assigneeID.Valid || assigneeID != issue.AssigneeID {
 		t.Fatalf("assignee changed: type=%q id.valid=%v, want unchanged from id.valid=%v", assigneeType, assigneeID.Valid, issue.AssigneeID.Valid)
 	}
+}
+
+// createIssueDoneRaceTrigger makes the literal "drag a card to done" UPDATE
+// (any transition into status = 'done' on the fixture's own issue row) sleep
+// for 0.2s while holding that row's lock. This is what widens the window for
+// TestMarkIssueRunningDoesNotClobberAConcurrentDone and its siblings: the
+// lifecycle writer's own GetIssue is a plain read that returns immediately
+// with the pre-transaction status (read committed semantics - the concurrent
+// done write hasn't committed yet), but the writer's own guarded UPDATE then
+// has to wait for this row's lock. By the time it gets it, the done write has
+// committed, and Postgres re-evaluates the UPDATE's WHERE clause against that
+// newly-committed row before applying anything - exactly reproducing (and,
+// for the guarded queries, closing) the TOCTOU this suite is proving. Scoped
+// by a WHEN clause to one issue id; fixed trigger/function names with
+// DROP ... IF EXISTS before CREATE and the drops registered in t.Cleanup,
+// matching this file's other trigger helpers (installStatusFailTrigger,
+// installCommentBeforeAssigneeClearTrigger).
+func createIssueDoneRaceTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, issueID string) {
+	t.Helper()
+	triggerName := "lifecycle_done_race_" + name
+	functionName := triggerName + "_fn"
+
+	drop := func() {
+		pool.Exec(context.Background(), fmt.Sprintf("DROP TRIGGER IF EXISTS %s ON issue", quoteIdent(triggerName)))
+		pool.Exec(context.Background(), fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", quoteIdent(functionName)))
+	}
+	drop()
+	t.Cleanup(drop)
+
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION %s()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $$
+		BEGIN
+			PERFORM pg_sleep(0.2);
+			RETURN NEW;
+		END;
+		$$;
+	`, quoteIdent(functionName))); err != nil {
+		t.Fatalf("create issue done-race sleep trigger function: %v", err)
+	}
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		CREATE TRIGGER %s
+		BEFORE UPDATE OF status ON issue
+		FOR EACH ROW
+		WHEN (NEW.id = %s::uuid AND NEW.status = 'done')
+		EXECUTE FUNCTION %s();
+	`, quoteIdent(triggerName), quoteLiteral(issueID), quoteIdent(functionName))); err != nil {
+		t.Fatalf("create issue done-race sleep trigger: %v", err)
+	}
+}
+
+// concurrentDoneWrite issues the literal "drag to done" UPDATE against
+// issueID in a goroutine, returning a WaitGroup callers must Wait() on once
+// they're done exercising the lifecycle writer under test. Callers must
+// sleep briefly after starting this before invoking the writer under test,
+// so the done write has had time to start its transaction, acquire the row
+// lock, and enter createIssueDoneRaceTrigger's 0.2s sleep before the
+// writer's own GetIssue runs.
+func concurrentDoneWrite(t *testing.T, pool *pgxpool.Pool, issueID string) *sync.WaitGroup {
+	t.Helper()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := pool.Exec(context.Background(), `UPDATE issue SET status = 'done', updated_at = now() WHERE id = $1`, issueID); err != nil {
+			t.Errorf("concurrent done write: %v", err)
+		}
+	}()
+	return &wg
+}
+
+// TestMarkIssueRunningDoesNotClobberAConcurrentDone is the headline proof for
+// the guarded write. done is the merge trigger, and dragging a card out of
+// done is how a human cancels a merge. If a run-start status write is
+// computed from a stale pre-done read and then lands after a concurrent done
+// write, the card is silently dragged back to in_progress, cancelling the
+// merge with no error and no log - the exact bug this fix closes. See
+// createIssueDoneRaceTrigger for how the interleaving is forced.
+func TestMarkIssueRunningDoesNotClobberAConcurrentDone(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, agentName, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MRR", number: 700040}, StatusTodo)
+	issueID := util.UUIDToString(issue.ID)
+
+	createIssueDoneRaceTrigger(t, ctx, pool, "running", issueID)
+	wg := concurrentDoneWrite(t, pool, issueID)
+	time.Sleep(50 * time.Millisecond)
+
+	svc.MarkIssueRunning(ctx, issue, agentName)
+
+	wg.Wait()
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != StatusDone {
+		t.Fatalf("status = %q, want %q (a concurrent done write must survive a run-start status write based on a stale read)", status, StatusDone)
+	}
+}
+
+// TestMarkIssueBlockedDoesNotClobberAConcurrentDone is MarkIssueRunning's
+// sibling proof: a task failing after its PR already merged (done) must not
+// drag the card back to blocked because MarkIssueBlocked's own status check
+// read a stale pre-done value. Same interleaving as
+// TestMarkIssueRunningDoesNotClobberAConcurrentDone; see
+// createIssueDoneRaceTrigger.
+func TestMarkIssueBlockedDoesNotClobberAConcurrentDone(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, agentID, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MBR", number: 700041, assign: true}, StatusInProgress)
+	issueID := util.UUIDToString(issue.ID)
+
+	createIssueDoneRaceTrigger(t, ctx, pool, "blocked", issueID)
+	wg := concurrentDoneWrite(t, pool, issueID)
+	time.Sleep(50 * time.Millisecond)
+
+	svc.MarkIssueBlocked(ctx, issue, util.MustParseUUID(agentID), "race-check")
+
+	wg.Wait()
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != StatusDone {
+		t.Fatalf("status = %q, want %q (a concurrent done write must survive a blocked-status write based on a stale read)", status, StatusDone)
+	}
+}
+
+// TestMarkIssueNotRunningDoesNotClobberAConcurrentDone proves the same
+// property for MarkIssueNotRunning, whose guarded write
+// (UpdateIssueStatusIfCurrentAndInactive) folds in the second,
+// active-task race alongside the status one - see the writer's docstring and
+// the query's own comment in issue.sql.
+func TestMarkIssueNotRunningDoesNotClobberAConcurrentDone(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MNRR", number: 700042}, StatusInProgress)
+	issueID := util.UUIDToString(issue.ID)
+
+	createIssueDoneRaceTrigger(t, ctx, pool, "notrunning", issueID)
+	wg := concurrentDoneWrite(t, pool, issueID)
+	time.Sleep(50 * time.Millisecond)
+
+	svc.MarkIssueNotRunning(ctx, issue.ID, "agent_tasks_cancelled")
+
+	wg.Wait()
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != StatusDone {
+		t.Fatalf("status = %q, want %q (a concurrent done write must survive a not-running status write based on a stale read)", status, StatusDone)
+	}
+}
+
+// assertIssueStatus is a small helper for the guarded-query unit tests below:
+// it reads back issueID's status and fails the test if it doesn't match
+// want, used to prove a guarded write that matched no row also left the row
+// completely unchanged.
+func assertIssueStatus(t *testing.T, ctx context.Context, pool *pgxpool.Pool, issueID pgtype.UUID, want string) {
+	t.Helper()
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != want {
+		t.Fatalf("status = %q, want unchanged %q", status, want)
+	}
+}
+
+// TestGuardedStatusQueriesMatchNoRowWhenStatusExcluded is the direct unit
+// test on the guarded queries themselves (independent of the service-layer
+// writers above): calling any of them with a permitted-status set that
+// excludes the row's actual current status must match no row - surfaced by
+// sqlc as pgx.ErrNoRows for a :one query - and must leave the row completely
+// unchanged, including any column (assignee) the statement would otherwise
+// have written.
+func TestGuardedStatusQueriesMatchNoRowWhenStatusExcluded(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	queries := db.New(pool)
+
+	t.Run("UpdateIssueStatusIfCurrent", func(t *testing.T) {
+		issue, _, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "GRD", number: 700043}, StatusDone)
+
+		_, err := queries.UpdateIssueStatusIfCurrent(ctx, db.UpdateIssueStatusIfCurrentParams{
+			ID:              issue.ID,
+			Status:          StatusInProgress,
+			WorkspaceID:     issue.WorkspaceID,
+			CurrentStatuses: promotableStatusList,
+		})
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("err = %v, want pgx.ErrNoRows", err)
+		}
+		assertIssueStatus(t, ctx, pool, issue.ID, StatusDone)
+	})
+
+	t.Run("UpdateIssueStatusAndUnassignIfCurrent", func(t *testing.T) {
+		issue, _, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "GRD", number: 700044, assign: true}, StatusDone)
+		if !issue.AssigneeID.Valid {
+			t.Fatal("fixture issue expected to start assigned")
+		}
+
+		_, err := queries.UpdateIssueStatusAndUnassignIfCurrent(ctx, db.UpdateIssueStatusAndUnassignIfCurrentParams{
+			ID:              issue.ID,
+			Status:          StatusBlocked,
+			WorkspaceID:     issue.WorkspaceID,
+			CurrentStatuses: promotableStatusList,
+		})
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("err = %v, want pgx.ErrNoRows", err)
+		}
+		assertIssueStatus(t, ctx, pool, issue.ID, StatusDone)
+
+		var assigneeID pgtype.UUID
+		if err := pool.QueryRow(ctx, `SELECT assignee_id FROM issue WHERE id = $1`, issue.ID).Scan(&assigneeID); err != nil {
+			t.Fatalf("read assignee: %v", err)
+		}
+		if !assigneeID.Valid {
+			t.Fatal("assignee_id cleared even though the guarded write matched no row")
+		}
+	})
+
+	t.Run("UpdateIssueStatusIfCurrentAndInactive", func(t *testing.T) {
+		issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "GRD", number: 700045}, StatusInProgress)
+		createLifecycleTask(t, ctx, pool, agentID, runtimeID, util.UUIDToString(issue.ID), "running")
+
+		_, err := queries.UpdateIssueStatusIfCurrentAndInactive(ctx, db.UpdateIssueStatusIfCurrentAndInactiveParams{
+			ID:              issue.ID,
+			Status:          StatusTodo,
+			WorkspaceID:     issue.WorkspaceID,
+			CurrentStatuses: []string{StatusInProgress},
+		})
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("err = %v, want pgx.ErrNoRows (an active task on the issue must also block the write)", err)
+		}
+		assertIssueStatus(t, ctx, pool, issue.ID, StatusInProgress)
+	})
 }
