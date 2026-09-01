@@ -726,7 +726,7 @@ func TestMarkIssueNotRunningReturnsInProgressToTodo(t *testing.T) {
 		t.Fatal("fixture issue expected to start assigned")
 	}
 
-	svc.MarkIssueNotRunning(ctx, issue, "agent_tasks_cancelled")
+	svc.MarkIssueNotRunning(ctx, issue.ID, "agent_tasks_cancelled")
 
 	var status, assigneeType string
 	var assigneeID pgtype.UUID
@@ -768,7 +768,7 @@ func TestMarkIssueNotRunningLeavesOtherStatusesAlone(t *testing.T) {
 			svc := NewTaskService(db.New(pool), pool, nil, events.New())
 
 			issue, _, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MNR", number: 700011 + int32(i)}, tc.start)
-			svc.MarkIssueNotRunning(ctx, issue, "agent_tasks_cancelled")
+			svc.MarkIssueNotRunning(ctx, issue.ID, "agent_tasks_cancelled")
 
 			var status string
 			if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
@@ -778,6 +778,51 @@ func TestMarkIssueNotRunningLeavesOtherStatusesAlone(t *testing.T) {
 				t.Fatalf("status = %q, want unchanged %q", status, tc.start)
 			}
 		})
+	}
+}
+
+// TestMarkIssueNotRunningLeavesCardAloneWhenAnotherAgentIsActive pins the
+// concurrency gate: a card at in_progress is not returned to todo when a
+// DIFFERENT agent still has a live task on the same issue. This is the
+// scenario promotableStatuses' own comment calls out ("a second run against
+// the same card, or a retry") from the opposite direction - agent A is still
+// running on the issue, agent B's tasks on the same issue get cancelled
+// (simulated here by calling MarkIssueNotRunning directly, as
+// CancelTasksForAgent would after cancelling B's rows), and the card must
+// stay in_progress because A is still working it. Flipping it to todo here
+// would be the same class of lie this writer exists to fix, in reverse.
+func TestMarkIssueNotRunningLeavesCardAloneWhenAnotherAgentIsActive(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	// Agent A's card, sitting at in_progress from A's own dispatch.
+	issue, _, _, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MNRC", number: 700030, assign: true}, StatusInProgress)
+
+	// A second agent (B) with a live task pointed at the SAME issue - the
+	// surviving run that must block the unwind.
+	var agentBID string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO agent (workspace_id, name, runtime_mode, runtime_config, runtime_id, visibility, max_concurrent_tasks)
+		VALUES ($1, $2, 'cloud', '{}'::jsonb, $3, 'private', 5)
+		RETURNING id`, util.UUIDToString(issue.WorkspaceID), fmt.Sprintf("MNRC Agent B %d", time.Now().UnixNano()), runtimeID).Scan(&agentBID); err != nil {
+		t.Fatalf("create second agent: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM agent WHERE id = $1`, agentBID)
+	})
+	createLifecycleTask(t, ctx, pool, agentBID, runtimeID, util.UUIDToString(issue.ID), "running")
+
+	// Simulate agent A's tasks having just been cancelled out from under
+	// the card - exactly what CancelTasksForAgent does before calling this.
+	svc.MarkIssueNotRunning(ctx, issue.ID, "agent_tasks_cancelled")
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if status != StatusInProgress {
+		t.Fatalf("issue status = %q, want unchanged %q while agent B's task is still active", status, StatusInProgress)
 	}
 }
 
@@ -810,7 +855,12 @@ func TestCancelTasksForAgentReturnsCardsToTodo(t *testing.T) {
 // unwind, unlike the blocked path - the operator cancelling this agent's
 // tasks did not learn anything that says the assignee can't do the work; an
 // archived agent's lingering assignment is harmless (isAgentAssigneeReady
-// returns false once archived_at is set).
+// returns false once archived_at is set). It also asserts the status itself
+// reached todo, so this test independently proves the unwind fired rather
+// than merely observing an assignee that was never touched in the first
+// place - without that assertion this test would keep passing even if the
+// unwind were dropped entirely, and would only ever catch a switch to
+// UpdateIssueStatusAndUnassign.
 func TestCancelTasksForAgentKeepsTheAssignee(t *testing.T) {
 	ctx := context.Background()
 	pool := newTaskClaimRacePool(t)
@@ -826,11 +876,14 @@ func TestCancelTasksForAgentKeepsTheAssignee(t *testing.T) {
 		t.Fatalf("CancelTasksForAgent: %v", err)
 	}
 
-	var assigneeType string
+	var status, assigneeType string
 	var assigneeID pgtype.UUID
-	if err := pool.QueryRow(ctx, `SELECT assignee_type, assignee_id FROM issue WHERE id = $1`, issue.ID).
-		Scan(&assigneeType, &assigneeID); err != nil {
-		t.Fatalf("read issue assignee: %v", err)
+	if err := pool.QueryRow(ctx, `SELECT status, assignee_type, assignee_id FROM issue WHERE id = $1`, issue.ID).
+		Scan(&status, &assigneeType, &assigneeID); err != nil {
+		t.Fatalf("read issue: %v", err)
+	}
+	if status != StatusTodo {
+		t.Fatalf("issue status = %q, want %q - the unwind must have fired for this test to prove anything about the assignee", status, StatusTodo)
 	}
 	if assigneeType != "agent" || !assigneeID.Valid || assigneeID != issue.AssigneeID {
 		t.Fatalf("assignee changed: type=%q id.valid=%v, want unchanged from id.valid=%v", assigneeType, assigneeID.Valid, issue.AssigneeID.Valid)

@@ -1661,13 +1661,7 @@ func (s *TaskService) CancelTasksForAgent(ctx context.Context, agentID pgtype.UU
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
 		if t.IssueID.Valid && !unwoundIssues[t.IssueID] {
 			unwoundIssues[t.IssueID] = true
-			if issue, err := s.Queries.GetIssue(ctx, t.IssueID); err != nil {
-				if !errors.Is(err, pgx.ErrNoRows) {
-					slog.Error("cancel tasks for agent: load issue for not-running status", "error", err, "issue_id", util.UUIDToString(t.IssueID))
-				}
-			} else {
-				s.MarkIssueNotRunning(ctx, issue, "agent_tasks_cancelled")
-			}
+			s.MarkIssueNotRunning(ctx, t.IssueID, "agent_tasks_cancelled")
 		}
 	}
 	// Reconcile once after the loop — agent transitions from

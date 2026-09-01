@@ -223,6 +223,17 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 // path's comment exists because a failure is a surprise, an abandonment
 // isn't.
 //
+// Unlike MarkIssueRunning/MarkIssueBlocked, this takes an issue ID rather
+// than a db.Issue - deliberately, not an oversight: none of its three
+// callers (CancelTasksForAgent, and the transactional unwinds in
+// runtime.go/workspace_revoke.go) has an issue row in hand already, each was
+// calling GetIssue purely to build an argument this function immediately
+// discards in favour of its own re-read below. Taking the ID directly drops
+// a redundant round-trip and ~7 duplicated lines of pgx.ErrNoRows handling
+// per call site, and makes the internal re-read structural (there is no
+// struct to pass a stale copy of) rather than a discipline callers have to
+// maintain.
+//
 // Writes via UpdateIssueStatus (not the unassign variant): unlike a failed
 // run, an abandoned one has not told us anything about the assignee being
 // unable to do the work, so the assignee is left in place. An archived
@@ -234,9 +245,9 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 // Info), and this never returns an error because no caller may change
 // cancel/delete/revoke behaviour on its result.
 //
-// The guard here is deliberately NARROWER than MayPromoteToRunning, and that
-// is intentional, not an oversight: this writer only undoes a write this
-// system itself made (RunStartStatus promoting a card to in_progress on
+// The status guard here is deliberately NARROWER than MayPromoteToRunning,
+// and that is intentional, not an oversight: this writer only undoes a write
+// this system itself made (RunStartStatus promoting a card to in_progress on
 // dispatch), so it must fire only when the card is still sitting exactly at
 // in_progress. Reusing promotableStatuses (backlog/todo/blocked/in_progress)
 // would let a runtime delete or agent-cancel drag an already-blocked card
@@ -244,17 +255,48 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 // reason that has nothing to do with that failure. If a future reader is
 // tempted to unify this with promotableStatuses, don't: the two guards
 // answer different questions ("may a run start/park here?" vs. "is this
-// exactly the write we're allowed to undo?").
-func (s *TaskService) MarkIssueNotRunning(ctx context.Context, issue db.Issue, cause string) {
-	current, err := s.Queries.GetIssue(ctx, issue.ID)
+// exactly the write we're allowed to undo?"). See the "if" below for the
+// second gate this docstring also covers.
+//
+// The status guard alone is not enough: it only knows about the batch of
+// tasks the caller just cancelled, not about other agents. All three call
+// sites are scoped to one agent's or one runtime's tasks, and concurrent runs
+// on a single card are a real, acknowledged state here (see
+// promotableStatuses' own comment on "a second run against the same card, or
+// a retry"). So after the status check, this also checks
+// HasActiveTaskForIssue: if a different agent still has a live
+// queued/dispatched/running/waiting_local_directory task pointed at this
+// same issue, that agent is still working it, and flipping the card back to
+// todo would be exactly the kind of lie this writer exists to prevent, just
+// in the opposite direction (a card that says "not running" while a run is
+// in fact still in flight). This mirrors HandleFailedTasks' identical gate
+// in task.go, which resets a stuck in_progress issue via the same
+// UpdateIssueStatus write only when HasActiveTaskForIssue is false - see
+// that function's comment for the sibling implementation of this exact
+// transition.
+func (s *TaskService) MarkIssueNotRunning(ctx context.Context, issueID pgtype.UUID, cause string) {
+	current, err := s.Queries.GetIssue(ctx, issueID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
-			slog.Error("lifecycle: reload issue for not-running status", "err", err, "issue_id", util.UUIDToString(issue.ID), "cause", cause)
+			slog.Error("lifecycle: reload issue for not-running status", "err", err, "issue_id", util.UUIDToString(issueID), "cause", cause)
 		}
 		return
 	}
+	// Narrow guard: only undo the exact write RunStartStatus made. See the
+	// docstring above for why this must not be widened to promotableStatuses.
 	if current.Status != StatusInProgress {
 		slog.Info("lifecycle: not-running status refused", "issue_id", util.UUIDToString(current.ID), "current_status", current.Status, "cause", cause)
+		return
+	}
+	// Concurrent-agent guard: don't return the card if another agent still
+	// has a live task on it. See the docstring above.
+	hasActive, err := s.Queries.HasActiveTaskForIssue(ctx, current.ID)
+	if err != nil {
+		slog.Error("lifecycle: active-task check for not-running status", "err", err, "issue_id", util.UUIDToString(current.ID), "cause", cause)
+		return
+	}
+	if hasActive {
+		slog.Info("lifecycle: not-running status refused, other task still active", "issue_id", util.UUIDToString(current.ID), "cause", cause)
 		return
 	}
 	prevStatus := current.Status

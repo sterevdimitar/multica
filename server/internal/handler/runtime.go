@@ -1097,13 +1097,7 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 				continue
 			}
 			unwoundIssues[t.IssueID] = true
-			if issue, err := h.Queries.GetIssue(r.Context(), t.IssueID); err != nil {
-				if !errors.Is(err, pgx.ErrNoRows) {
-					slog.Error("runtime delete: load issue for not-running status", "error", err, "issue_id", uuidToString(t.IssueID))
-				}
-			} else {
-				h.TaskService.MarkIssueNotRunning(r.Context(), issue, "runtime_deleted")
-			}
+			h.TaskService.MarkIssueNotRunning(r.Context(), t.IssueID, "runtime_deleted")
 		}
 	}
 	for _, a := range archivedAgents {

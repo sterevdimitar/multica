@@ -615,6 +615,56 @@ func TestDeleteMember_RevokesTargetRuntimes(t *testing.T) {
 	assertRevoked(t, fx)
 }
 
+// TestDeleteMember_ReturnsCardToTodo covers the workspace_revoke.go unwind:
+// when a member is removed, every runtime they own is revoked and its
+// in-flight tasks are cancelled (setupRevocationFixture's fx.TaskID already
+// proves that half). This test additionally proves the post-commit
+// MarkIssueNotRunning call in publishRevocation fires for a card the removed
+// member's agent was actively running - it must come back to todo, not stay
+// stuck at in_progress with no agent left able to pick it up.
+func TestDeleteMember_ReturnsCardToTodo(t *testing.T) {
+	fx := setupRevocationFixture(t, "handler-tests-revoke-card", "daemon-revoke-card")
+	ctx := context.Background()
+
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position, assignee_type, assignee_id)
+VALUES ($1, 'revoke-card-issue', 'in_progress', 'medium', $2, 'member', 92060, 0, 'agent', $3)
+RETURNING id
+`, fx.WorkspaceID, testUserID, fx.AgentID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID) })
+
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+VALUES ($1, $2, $3, 'running', 0)
+RETURNING id
+`, fx.AgentID, fx.RuntimeID, issueID).Scan(&taskID); err != nil {
+		t.Fatalf("create running task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	w := httptest.NewRecorder()
+	req := newRequest("DELETE", "/api/workspaces/"+fx.WorkspaceID+"/members/"+fx.MemberID, nil)
+	req.Header.Set("X-Workspace-ID", fx.WorkspaceID)
+	req = withURLParams(req, "id", fx.WorkspaceID, "memberId", fx.MemberID)
+	testHandler.DeleteMember(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("DeleteMember: expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var issueStatus string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&issueStatus); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if issueStatus != "todo" {
+		t.Fatalf("issue status = %q, want %q", issueStatus, "todo")
+	}
+}
+
 // TestDeleteMember_PrunesChannelUserBindings verifies the application-layer
 // replacement for the channel_user_binding member-FK cascade (MUL-3515 §4):
 // removing a member prunes that member's channel bindings, in the same tx as

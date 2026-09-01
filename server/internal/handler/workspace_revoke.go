@@ -2,10 +2,8 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -206,13 +204,7 @@ func (h *Handler) publishRevocation(ctx context.Context, result revocationResult
 				continue
 			}
 			unwoundIssues[t.IssueID] = true
-			if issue, err := h.Queries.GetIssue(ctx, t.IssueID); err != nil {
-				if !errors.Is(err, pgx.ErrNoRows) {
-					slog.Error("workspace revoke: load issue for not-running status", "error", err, "issue_id", uuidToString(t.IssueID))
-				}
-			} else {
-				h.TaskService.MarkIssueNotRunning(ctx, issue, "workspace_revoked")
-			}
+			h.TaskService.MarkIssueNotRunning(ctx, t.IssueID, "workspace_revoked")
 		}
 	}
 

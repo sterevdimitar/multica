@@ -244,6 +244,28 @@ func TestArchiveAgentsAndDeleteRuntime_HappyPath(t *testing.T) {
 	runtimeID := createCascadeFixtureRuntime(t, ctx, "Cascade Happy Runtime")
 	agentID := createCascadeFixtureAgent(t, ctx, runtimeID, "Cascade Happy Agent")
 
+	// A card the agent was actively running when the runtime got deleted
+	// out from under it - the transactional MarkIssueNotRunning unwind
+	// (runtime.go) must return this to todo post-commit, matching the
+	// coverage CancelTasksForAgent already has in the service package.
+	var issueID, taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type, number, position, assignee_type, assignee_id)
+		VALUES ($1, 'cascade-happy-issue', 'in_progress', 'medium', $2, 'member', 92050, 0, 'agent', $3)
+		RETURNING id
+	`, testWorkspaceID, testUserID, agentID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID) })
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+		VALUES ($1, $2, $3, 'running', 0)
+		RETURNING id
+	`, agentID, runtimeID, issueID).Scan(&taskID); err != nil {
+		t.Fatalf("create running task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/runtimes/"+runtimeID+"/archive-agents-and-delete",
 		map[string]any{"expected_active_agent_ids": []string{agentID}})
@@ -269,6 +291,16 @@ func TestArchiveAgentsAndDeleteRuntime_HappyPath(t *testing.T) {
 	}
 	if agentRows != 0 {
 		t.Fatalf("expected archived agent to be hard-deleted with runtime, found %d", agentRows)
+	}
+	// The card the deleted runtime's agent was running must be returned to
+	// todo by the post-commit MarkIssueNotRunning unwind, not left stuck at
+	// in_progress with nothing left to run it.
+	var issueStatus string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&issueStatus); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if issueStatus != "todo" {
+		t.Fatalf("issue status = %q, want %q", issueStatus, "todo")
 	}
 }
 
