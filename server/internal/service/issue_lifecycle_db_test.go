@@ -711,3 +711,128 @@ func TestFailTaskDoesNotBlockWhenAutoRetryIsPending(t *testing.T) {
 		t.Fatalf("retry task count = %d, want 1", retryCount)
 	}
 }
+
+// TestMarkIssueNotRunningReturnsInProgressToTodo proves the abandoned-run
+// unwind: a card sitting at in_progress (a run was dispatched, then the task
+// was cancelled out from under it rather than failing) returns to todo, and
+// its assignee is left untouched - unlike MarkIssueBlocked, which clears it.
+func TestMarkIssueNotRunningReturnsInProgressToTodo(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MNR", number: 700010, assign: true}, StatusInProgress)
+	if !issue.AssigneeID.Valid {
+		t.Fatal("fixture issue expected to start assigned")
+	}
+
+	svc.MarkIssueNotRunning(ctx, issue, "agent_tasks_cancelled")
+
+	var status, assigneeType string
+	var assigneeID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT status, assignee_type, assignee_id FROM issue WHERE id = $1`, issue.ID).
+		Scan(&status, &assigneeType, &assigneeID); err != nil {
+		t.Fatalf("read issue: %v", err)
+	}
+	if status != StatusTodo {
+		t.Fatalf("status = %q, want %q", status, StatusTodo)
+	}
+	if assigneeType != "agent" || !assigneeID.Valid || assigneeID != issue.AssigneeID {
+		t.Fatalf("assignee changed: type=%q id.valid=%v, want unchanged from id.valid=%v", assigneeType, assigneeID.Valid, issue.AssigneeID.Valid)
+	}
+}
+
+// TestMarkIssueNotRunningLeavesOtherStatusesAlone pins the narrow guard:
+// MarkIssueNotRunning must fire ONLY when the card is exactly at
+// in_progress. This is the important test in the group - it is the one most
+// likely to be broken by a future "unify with promotableStatuses" refactor,
+// which would incorrectly let this writer drag an already-blocked card (a
+// real failure signal) back to todo on an unrelated cancel/delete/revoke.
+func TestMarkIssueNotRunningLeavesOtherStatusesAlone(t *testing.T) {
+	cases := []struct {
+		name  string
+		start string
+	}{
+		{"LeavesBacklogAlone", StatusBacklog},
+		{"LeavesTodoAlone", StatusTodo},
+		{"LeavesBlockedAlone", StatusBlocked},
+		{"LeavesInReviewAlone", StatusInReview},
+		{"LeavesDoneAlone", StatusDone},
+		{"LeavesCancelledAlone", StatusCancelled},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := newTaskClaimRacePool(t)
+			svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+			issue, _, _, _ := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "MNR", number: 700011 + int32(i)}, tc.start)
+			svc.MarkIssueNotRunning(ctx, issue, "agent_tasks_cancelled")
+
+			var status string
+			if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+				t.Fatalf("read status: %v", err)
+			}
+			if status != tc.start {
+				t.Fatalf("status = %q, want unchanged %q", status, tc.start)
+			}
+		})
+	}
+}
+
+// TestCancelTasksForAgentReturnsCardsToTodo proves the unwind is wired into
+// the actual "cancel all tasks for an agent" call site, not just reachable in
+// isolation: a card at in_progress with an active task reaches todo once
+// CancelTasksForAgent cancels that task.
+func TestCancelTasksForAgentReturnsCardsToTodo(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "CTA", number: 700020, assign: true}, StatusInProgress)
+	createLifecycleTask(t, ctx, pool, agentID, runtimeID, util.UUIDToString(issue.ID), "running")
+
+	if _, err := svc.CancelTasksForAgent(ctx, util.MustParseUUID(agentID)); err != nil {
+		t.Fatalf("CancelTasksForAgent: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+		t.Fatalf("read issue status: %v", err)
+	}
+	if status != StatusTodo {
+		t.Fatalf("issue status = %q, want %q", status, StatusTodo)
+	}
+}
+
+// TestCancelTasksForAgentKeepsTheAssignee proves the assignee survives the
+// unwind, unlike the blocked path - the operator cancelling this agent's
+// tasks did not learn anything that says the assignee can't do the work; an
+// archived agent's lingering assignment is harmless (isAgentAssigneeReady
+// returns false once archived_at is set).
+func TestCancelTasksForAgentKeepsTheAssignee(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	svc := NewTaskService(db.New(pool), pool, nil, events.New())
+
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool, lifecycleFixtureOpts{prefix: "CTA", number: 700021, assign: true}, StatusInProgress)
+	if !issue.AssigneeID.Valid {
+		t.Fatal("fixture issue expected to start assigned")
+	}
+	createLifecycleTask(t, ctx, pool, agentID, runtimeID, util.UUIDToString(issue.ID), "running")
+
+	if _, err := svc.CancelTasksForAgent(ctx, util.MustParseUUID(agentID)); err != nil {
+		t.Fatalf("CancelTasksForAgent: %v", err)
+	}
+
+	var assigneeType string
+	var assigneeID pgtype.UUID
+	if err := pool.QueryRow(ctx, `SELECT assignee_type, assignee_id FROM issue WHERE id = $1`, issue.ID).
+		Scan(&assigneeType, &assigneeID); err != nil {
+		t.Fatalf("read issue assignee: %v", err)
+	}
+	if assigneeType != "agent" || !assigneeID.Valid || assigneeID != issue.AssigneeID {
+		t.Fatalf("assignee changed: type=%q id.valid=%v, want unchanged from id.valid=%v", assigneeType, assigneeID.Valid, issue.AssigneeID.Valid)
+	}
+}

@@ -1651,10 +1651,24 @@ func (s *TaskService) CancelTasksForAgent(ctx context.Context, agentID pgtype.UU
 	if err != nil {
 		return nil, err
 	}
+	// Dedupe by issue: several cancelled rows can share one issue, and
+	// MarkIssueNotRunning must not be asked to write the same issue twice
+	// in this batch.
+	unwoundIssues := make(map[pgtype.UUID]bool)
 	for _, t := range cancelled {
 		s.captureTaskCancelled(ctx, t)
 		s.MaybeDispatchCancelToWebhook(ctx, t)
 		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
+		if t.IssueID.Valid && !unwoundIssues[t.IssueID] {
+			unwoundIssues[t.IssueID] = true
+			if issue, err := s.Queries.GetIssue(ctx, t.IssueID); err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					slog.Error("cancel tasks for agent: load issue for not-running status", "error", err, "issue_id", util.UUIDToString(t.IssueID))
+				}
+			} else {
+				s.MarkIssueNotRunning(ctx, issue, "agent_tasks_cancelled")
+			}
+		}
 	}
 	// Reconcile once after the loop — agent transitions from
 	// working→available based on remaining task counts, no need to call

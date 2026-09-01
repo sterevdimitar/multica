@@ -2,8 +2,10 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -189,6 +191,29 @@ func (h *Handler) publishRevocation(ctx context.Context, result revocationResult
 	// from active lists, matching the order ArchiveAgent uses.
 	if h.TaskService != nil && len(result.CancelledTasks) > 0 {
 		h.TaskService.BroadcastCancelledTasks(ctx, result.CancelledTasks)
+	}
+
+	// Return each abandoned card's issue to todo now that the transaction
+	// has committed (publishRevocation is only ever called post-commit — see
+	// its docstring) — never inside it, matching the discipline FailTask uses
+	// for MarkIssueBlocked. Dedupe by issue id: several cancelled tasks can
+	// share one issue, and MarkIssueNotRunning must not be asked to write it
+	// twice.
+	if h.TaskService != nil && len(result.CancelledTasks) > 0 {
+		unwoundIssues := make(map[pgtype.UUID]bool)
+		for _, t := range result.CancelledTasks {
+			if !t.IssueID.Valid || unwoundIssues[t.IssueID] {
+				continue
+			}
+			unwoundIssues[t.IssueID] = true
+			if issue, err := h.Queries.GetIssue(ctx, t.IssueID); err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					slog.Error("workspace revoke: load issue for not-running status", "error", err, "issue_id", uuidToString(t.IssueID))
+				}
+			} else {
+				h.TaskService.MarkIssueNotRunning(ctx, issue, "workspace_revoked")
+			}
+		}
 	}
 
 	for _, agent := range result.ArchivedAgents {

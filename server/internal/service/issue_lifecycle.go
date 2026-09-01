@@ -211,6 +211,75 @@ func (s *TaskService) MarkIssueBlocked(ctx context.Context, issue db.Issue, agen
 	s.createAgentComment(ctx, current.ID, agentID, blockedReasonCommentBody(failureReason), "system", pgtype.UUID{}, pgtype.UUID{})
 }
 
+// MarkIssueNotRunning returns a card to todo when the run that put it at
+// in_progress was abandoned rather than finished - e.g. an operator cancelled
+// every task for an agent, deleted/reassigned a runtime, or revoked a
+// workspace member, none of which is a task failure and none of which the
+// operator experiences as a surprise. cause is log context only (e.g.
+// "agent_tasks_cancelled", "runtime_deleted", "workspace_revoked") - it is
+// never written to the issue or posted as a comment: unlike MarkIssueBlocked,
+// this writer does not post anything, because the operator who cancelled the
+// tasks or deleted the runtime already knows they did it - the failure
+// path's comment exists because a failure is a surprise, an abandonment
+// isn't.
+//
+// Writes via UpdateIssueStatus (not the unassign variant): unlike a failed
+// run, an abandoned one has not told us anything about the assignee being
+// unable to do the work, so the assignee is left in place. An archived
+// agent's lingering assignment is harmless - isAgentAssigneeReady returns
+// false once agent.archived_at is set, so the card cannot wake on it.
+//
+// Best-effort, same rationale as MarkIssueRunning/MarkIssueBlocked: every
+// write failure is logged and swallowed, a guard refusal is logged too (at
+// Info), and this never returns an error because no caller may change
+// cancel/delete/revoke behaviour on its result.
+//
+// The guard here is deliberately NARROWER than MayPromoteToRunning, and that
+// is intentional, not an oversight: this writer only undoes a write this
+// system itself made (RunStartStatus promoting a card to in_progress on
+// dispatch), so it must fire only when the card is still sitting exactly at
+// in_progress. Reusing promotableStatuses (backlog/todo/blocked/in_progress)
+// would let a runtime delete or agent-cancel drag an already-blocked card
+// back to todo, erasing a real "a task on this card failed" signal for a
+// reason that has nothing to do with that failure. If a future reader is
+// tempted to unify this with promotableStatuses, don't: the two guards
+// answer different questions ("may a run start/park here?" vs. "is this
+// exactly the write we're allowed to undo?").
+func (s *TaskService) MarkIssueNotRunning(ctx context.Context, issue db.Issue, cause string) {
+	current, err := s.Queries.GetIssue(ctx, issue.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Error("lifecycle: reload issue for not-running status", "err", err, "issue_id", util.UUIDToString(issue.ID), "cause", cause)
+		}
+		return
+	}
+	if current.Status != StatusInProgress {
+		slog.Info("lifecycle: not-running status refused", "issue_id", util.UUIDToString(current.ID), "current_status", current.Status, "cause", cause)
+		return
+	}
+	prevStatus := current.Status
+	updated, err := s.Queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
+		ID:          current.ID,
+		Status:      StatusTodo,
+		WorkspaceID: current.WorkspaceID,
+	})
+	if err != nil {
+		slog.Error("lifecycle: write not-running status", "err", err,
+			"issue_id", util.UUIDToString(current.ID),
+			"workspace_id", util.UUIDToString(current.WorkspaceID),
+			"current_status", prevStatus,
+			"new_status", StatusTodo,
+			"cause", cause)
+		return
+	}
+	slog.Info("lifecycle: not-running status written",
+		"issue_id", util.UUIDToString(current.ID),
+		"prev_status", prevStatus,
+		"new_status", StatusTodo,
+		"cause", cause)
+	s.broadcastIssueUpdated(updated, prevStatus)
+}
+
 // blockedCommentReasonReplacer neutralises characters in failureReason that
 // would otherwise escape the markdown code span it is interpolated into.
 // failure_reason is not constrained to the classifier's taxonomy at the API

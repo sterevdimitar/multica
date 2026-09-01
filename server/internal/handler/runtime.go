@@ -1084,6 +1084,28 @@ func (h *Handler) ArchiveAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.R
 	if h.TaskService != nil && len(cancelledTasks) > 0 {
 		h.TaskService.BroadcastCancelledTasks(r.Context(), cancelledTasks)
 	}
+	// Return each abandoned card's issue to todo now that the transaction
+	// has committed — never inside it, matching the discipline FailTask uses
+	// for MarkIssueBlocked: a write inside the tx would roll back with any
+	// later failure in this handler and would hold issue-row locks for the
+	// rest of it. Dedupe by issue id: several cancelled tasks can share one
+	// issue, and MarkIssueNotRunning must not be asked to write it twice.
+	if h.TaskService != nil && len(cancelledTasks) > 0 {
+		unwoundIssues := make(map[pgtype.UUID]bool)
+		for _, t := range cancelledTasks {
+			if !t.IssueID.Valid || unwoundIssues[t.IssueID] {
+				continue
+			}
+			unwoundIssues[t.IssueID] = true
+			if issue, err := h.Queries.GetIssue(r.Context(), t.IssueID); err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					slog.Error("runtime delete: load issue for not-running status", "error", err, "issue_id", uuidToString(t.IssueID))
+				}
+			} else {
+				h.TaskService.MarkIssueNotRunning(r.Context(), issue, "runtime_deleted")
+			}
+		}
+	}
 	for _, a := range archivedAgents {
 		h.publish(protocol.EventAgentArchived, wsID, "member", userID, map[string]any{
 			"agent": agentToResponse(a),
