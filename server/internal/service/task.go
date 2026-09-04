@@ -3178,10 +3178,25 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 // the platform retry it directly (MUL-4910). It is resume-safe (not in
 // resumeUnsafeFailureReason), so the retry child inherits the session and
 // continues the truncated conversation rather than restarting from scratch.
+// dispatch_timeout is retryable for the same reason runtime_offline is: the
+// agent never got to make a decision, so there is no agent-side verdict to
+// respect. A webhook dispatch that produced no /start within its (generous)
+// deadline was almost certainly lost in transit, and re-POSTing it is the
+// correct recovery. This only became a real recovery once the retry path
+// learned to dispatch to webhook runtimes at all — see MaybeRetryFailedTask;
+// before that a "retry" here would only have parked a child in 'queued' for
+// two hours.
+//
+// The stale run this may race is harmless: if the original GitHub Actions job
+// eventually starts, its /start matches WHERE status='dispatched' and finds
+// nothing, and its callback JWT is bound to the now-dead task id, so every
+// subsequent callback is rejected. It burns CI minutes and cannot touch the
+// card.
 var retryableReasons = map[string]bool{
 	"runtime_offline":           true,
 	"runtime_recovery":          true,
 	"timeout":                   true,
+	"dispatch_timeout":          true,
 	"codex_semantic_inactivity": true,
 	string(taskfailure.ReasonAgentProviderNetwork): true,
 }
@@ -3369,9 +3384,20 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	// queued first, then notify the daemon — see EnqueueTaskForIssue for ordering
 	// rationale. A deferred child (backoff armed) stays inert until
 	// PromoteDueDeferredTasksForRuntime fires its queued event + wakeup.
+	//
+	// The webhook branch mirrors the four enqueue sites in this file: a webhook
+	// runtime has no daemon listening for NotifyTaskEnqueued's wakeup, so
+	// without this the retry child sat 'queued' until queuedTTLSeconds (2h) and
+	// then expired as 'queued_expired'. Every auto-retry of a webhook task was
+	// therefore dead on arrival — the retry appeared to be enqueued, logged as
+	// enqueued, and never ran. MaybeDispatchToWebhook returning false means the
+	// runtime is local (or the feature flag is off), in which case the daemon
+	// wakeup below is the correct path.
 	if child.Status == "queued" {
 		s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, child)
-		s.NotifyTaskEnqueued(ctx, child)
+		if !s.MaybeDispatchToWebhook(ctx, child) {
+			s.NotifyTaskEnqueued(ctx, child)
+		}
 	}
 	return &child, nil
 }
@@ -3623,6 +3649,27 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 // recover-orphans — funnel through here so the same UI-consistency
 // guarantees apply on every code path.
 func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTaskQueue) int {
+	return s.handleFailedTasks(ctx, tasks, false)
+}
+
+// HandleFailedWebhookTasks is HandleFailedTasks with one difference: a card
+// whose last task failed is parked at `blocked` (via MarkIssueBlocked) rather
+// than reset to `todo`.
+//
+// The todo reset is right for a daemon runtime, where "the daemon died, put
+// the work back on the board" is the whole story and another daemon may claim
+// it moments later. It is wrong for a webhook runtime, where nothing will
+// re-claim the card on its own: a task that timed out without ever starting
+// leaves a card that looks exactly like one nobody has touched yet, which is
+// the reported bug. MarkIssueBlocked also posts the reason comment and clears
+// the stale agent assignee, so the card says why it stopped.
+func (s *TaskService) HandleFailedWebhookTasks(ctx context.Context, tasks []db.AgentTaskQueue) int {
+	return s.handleFailedTasks(ctx, tasks, true)
+}
+
+// handleFailedTasks is the shared body. parkBlocked selects the terminal issue
+// action; see HandleFailedWebhookTasks for why the two differ.
+func (s *TaskService) handleFailedTasks(ctx context.Context, tasks []db.AgentTaskQueue, parkBlocked bool) int {
 	if len(tasks) == 0 {
 		return 0
 	}
@@ -3655,7 +3702,35 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 				// Reset stuck in_progress issues only when no other active
 				// task exists for the issue and no retry was just enqueued.
 				issueKey := util.UUIDToString(t.IssueID)
-				if issue.Status == "in_progress" && !processedIssues[issueKey] && !retriedIssues[issueKey] {
+				if parkBlocked {
+					// Webhook arm: park at blocked instead of resetting to todo.
+					//
+					// The !retriedIssues guard is the same one FailTask applies
+					// before its own MarkIssueBlocked call, and for the same
+					// reason: when a retry is pending the card stays exactly
+					// where the original dispatch left it, and the retry's
+					// dispatch re-promotes it. Blocking a card that is about to
+					// re-run is board-visible spam on every transient hiccup.
+					//
+					// No `issue.Status == "in_progress"` precondition here, in
+					// contrast to the todo arm below: MarkIssueBlocked re-reads
+					// the row and applies promotableStatuses itself, so a card
+					// a human already moved to in_review — or one a merge took
+					// to done — is refused at the write rather than by a check
+					// against the status we happened to read a moment ago.
+					if !processedIssues[issueKey] && !retriedIssues[issueKey] {
+						processedIssues[issueKey] = true
+						hasActive, checkErr := s.Queries.HasActiveTaskForIssue(ctx, t.IssueID)
+						if checkErr != nil {
+							slog.Warn("handle failed webhook tasks: active check failed",
+								"issue_id", issueKey,
+								"error", checkErr,
+							)
+						} else if !hasActive {
+							s.MarkIssueBlocked(ctx, issue, t.AgentID, failureReason)
+						}
+					}
+				} else if issue.Status == "in_progress" && !processedIssues[issueKey] && !retriedIssues[issueKey] {
 					processedIssues[issueKey] = true
 					hasActive, checkErr := s.Queries.HasActiveTaskForIssue(ctx, t.IssueID)
 					if checkErr != nil {

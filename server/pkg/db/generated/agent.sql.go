@@ -2301,19 +2301,26 @@ UPDATE agent_task_queue
 SET status = 'failed', completed_at = now(), error = 'task timed out',
     failure_reason = 'timeout',
     prepare_lease_expires_at = NULL
-WHERE (
-    status = 'dispatched'
-    AND dispatched_at < now() - make_interval(secs => $1::double precision)
-    AND (prepare_lease_expires_at IS NULL OR prepare_lease_expires_at < now())
+WHERE NOT EXISTS (
+    SELECT 1 FROM agent_runtime wr
+    WHERE wr.id = agent_task_queue.runtime_id
+      AND wr.runtime_mode = 'webhook'
   )
-   OR (
-    status = 'running'
-    AND started_at < now() - make_interval(secs => $2::double precision)
-    AND NOT EXISTS (
-      SELECT 1 FROM agent_runtime r
-      WHERE r.id = agent_task_queue.runtime_id
-        AND r.status = 'online'
-        AND r.last_seen_at >= now() - make_interval(secs => $3::double precision)
+  AND (
+    (
+      status = 'dispatched'
+      AND dispatched_at < now() - make_interval(secs => $1::double precision)
+      AND (prepare_lease_expires_at IS NULL OR prepare_lease_expires_at < now())
+    )
+    OR (
+      status = 'running'
+      AND started_at < now() - make_interval(secs => $2::double precision)
+      AND NOT EXISTS (
+        SELECT 1 FROM agent_runtime r
+        WHERE r.id = agent_task_queue.runtime_id
+          AND r.status = 'online'
+          AND r.last_seen_at >= now() - make_interval(secs => $3::double precision)
+      )
     )
   )
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id
@@ -2362,8 +2369,156 @@ type FailStaleTasksParams struct {
 // of this task can exceed the dispatch / running timeouts without being
 // "stuck". If the daemon dies, RecoverOrphanedTasksForRuntime reclaims
 // those rows at restart.
+//
+// Webhook-runtime rows are excluded entirely and swept by
+// FailStaleWebhookTasks instead. NEITHER liveness signal above exists for
+// them: DispatchAgentTask never writes a prepare lease (only the daemon's
+// startTaskPrepareLeaseExtender does), and a webhook runtime has no daemon to
+// bump last_seen_at — so both branches' guards are permanently satisfied and
+// both wall clocks fire unconditionally. Before this exclusion that was live:
+// task 4d74e5fe was killed 314s after dispatch having never started, and
+// c4a02334 was killed 9003s after starting. The exclusion is deliberately
+// ONE clause covering both branches rather than a copy in each: a webhook row
+// matched by both queries in the same sweeper tick would be failed twice with
+// two different failure_reason values, and which one survived would depend on
+// statement order.
 func (q *Queries) FailStaleTasks(ctx context.Context, arg FailStaleTasksParams) ([]AgentTaskQueue, error) {
 	rows, err := q.db.Query(ctx, failStaleTasks, arg.DispatchTimeoutSecs, arg.RunningTimeoutSecs, arg.RuntimeStaleSecs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.IsLeaderTask,
+			&i.WaitReason,
+			&i.InitiatorUserID,
+			&i.HandoffNote,
+			&i.PrepareLeaseExpiresAt,
+			&i.SquadID,
+			&i.RuntimeMcpOverlay,
+			&i.EscalationForTaskID,
+			&i.FireAt,
+			&i.OriginatorUserID,
+			&i.RuntimeConnectedApps,
+			&i.CoalescedCommentIds,
+			&i.DeliveredCommentIds,
+			&i.ChatInputTaskID,
+			&i.ChatFinalizeDeferredAt,
+			&i.OriginatorSource,
+			&i.DelegatedFromTaskID,
+			&i.RetryOfTaskID,
+			&i.RerunOfTaskID,
+			&i.RuleVersionID,
+			&i.TriggerEvidenceKind,
+			&i.TriggerEvidenceRefID,
+			&i.AccountableUserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const failStaleWebhookTasks = `-- name: FailStaleWebhookTasks :many
+UPDATE agent_task_queue
+SET status = 'failed', completed_at = now(),
+    error = CASE
+      WHEN status = 'dispatched' THEN 'webhook task was never started by its receiver'
+      ELSE 'task timed out'
+    END,
+    failure_reason = CASE
+      WHEN status = 'dispatched' THEN 'dispatch_timeout'
+      ELSE 'timeout'
+    END,
+    prepare_lease_expires_at = NULL
+WHERE EXISTS (
+    SELECT 1 FROM agent_runtime wr
+    WHERE wr.id = agent_task_queue.runtime_id
+      AND wr.runtime_mode = 'webhook'
+  )
+  AND (
+    (
+      status = 'dispatched'
+      AND dispatched_at < now() - make_interval(secs => $1::double precision)
+    )
+    OR (
+      status = 'running'
+      AND started_at < now() - make_interval(secs => $2::double precision)
+    )
+  )
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id
+`
+
+type FailStaleWebhookTasksParams struct {
+	DispatchTimeoutSecs float64 `json:"dispatch_timeout_secs"`
+	RunningTimeoutSecs  float64 `json:"running_timeout_secs"`
+}
+
+// The webhook-runtime counterpart to FailStaleTasks. Split rather than folded
+// into it because the two have genuinely different liveness models, and
+// overloading one UPDATE with four thresholds plus a runtime_mode join makes
+// both unreadable. Splitting also leaves the upstream-shared daemon query's
+// semantics untouched.
+//
+// A webhook runtime proves nothing about itself between callbacks: it is a
+// stateless HTTP endpoint with no daemon, no prepare lease and no heartbeat.
+// What it does have is a hard, known ceiling on how long a run can possibly
+// live — GitHub Actions kills the job at `timeout-minutes: 30`
+// (dev-command-center's multica-runner.yml), a cap that exists in turn because
+// the callback JWT is issued once at dispatch with a 60-minute TTL and is
+// never refreshed. That known bound is what replaces the missing liveness
+// signal: a wall clock set above the job cap and below the JWT cannot possibly
+// be fired at a live run.
+//
+//   - Dispatched: the receiver has not posted /start. Healthy latency here is
+//     dominated by GitHub Actions queue delay plus ~48s of runner setup;
+//     measured at 60s on a real run. Callers pass a deadline far above that
+//     (see webhookDispatchTimeoutSeconds) so a slow-but-healthy dispatch is
+//     never killed. Fails as 'dispatch_timeout' — a distinct reason from the
+//     'timeout' below, because "the run never began" and "the run overran" are
+//     different operational problems and the sweeper is the only thing that
+//     can tell them apart.
+//
+//   - Running: /start arrived but no /complete or /fail ever did, so the row
+//     is orphaned — the workflow died, was cancelled, or its callback was
+//     lost. Keeps the 'timeout' reason; it means exactly what the daemon
+//     path's does.
+//
+// waiting_local_directory is not a state webhook tasks can reach (it is a
+// daemon-side path lock), so it needs no exclusion here.
+func (q *Queries) FailStaleWebhookTasks(ctx context.Context, arg FailStaleWebhookTasksParams) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, failStaleWebhookTasks, arg.DispatchTimeoutSecs, arg.RunningTimeoutSecs)
 	if err != nil {
 		return nil, err
 	}

@@ -51,6 +51,43 @@ const (
 	// liveness + DB stale + FailTasksForOfflineRuntimes), which typically
 	// reclaims orphaned tasks within ~180s.
 	runningTimeoutSeconds = 9000.0
+	// webhookDispatchTimeoutSeconds fails webhook tasks that never reached
+	// 'running' — the receiver never posted /start. Unlike the daemon's
+	// dispatched→running transition this is NOT near-instant: it spans the
+	// GitHub Actions queue delay, runner allocation, ~48s of toolchain setup
+	// (measured median; 46–64s range) and the workflow's pre-/start steps.
+	// A real healthy run was measured at 60s end to end.
+	//
+	// 1200s is 20x that measured latency. The bounded terms above are small
+	// and known; the unbounded one is GHA queue delay, which during GitHub
+	// incidents routinely runs 10–20 minutes — so a tighter deadline would
+	// false-fail healthy work during exactly the outage that makes the
+	// deadline worth having. Going much looser is not free either: the card
+	// asserts "in progress" for the whole window, and past ~45 minutes it has
+	// stopped being a useful signal. Worst-case detection is 20m30s with the
+	// 30s sweep tick.
+	webhookDispatchTimeoutSeconds = 1200.0
+	// webhookRunningTimeoutSeconds fails webhook tasks that started but never
+	// reported a terminal state — the workflow died, was cancelled, or its
+	// /complete / /fail callback was lost, leaving an orphaned row and a card
+	// stuck at in_progress.
+	//
+	// There is no liveness signal to AND this against, as there is for daemon
+	// runtimes: a webhook runtime has no heartbeat and no per-task lease. What
+	// makes a bare wall clock safe here is that the run has a hard, known
+	// ceiling — GitHub Actions kills the job at `timeout-minutes: 30`
+	// (dev-command-center's multica-runner.yml), itself set by the 60-minute
+	// callback JWT that is issued once at dispatch and never refreshed. 2400s
+	// sits above the job cap and below the JWT, so it cannot fire at a live
+	// run, and it catches an orphan in ~40 minutes instead of the 150 that
+	// runningTimeoutSeconds allowed (a real task, c4a02334, was swept at
+	// 9003s having been dead for over two hours).
+	//
+	// This constant is only safe while that 30-minute job cap holds, and the
+	// coupling is invisible from this repo: the cap lives in a workflow in
+	// dev-command-center. If it rises, this must be revisited — nothing will
+	// fail loudly to say so.
+	webhookRunningTimeoutSeconds = 2400.0
 	// queuedTTLSeconds expires tasks that have been sitting in 'queued'
 	// for longer than this without ever being claimed. This is the cleanup
 	// arm of the MUL-1899 backlog fix: even with the dispatch-time
@@ -100,6 +137,7 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 		case <-ticker.C:
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepStaleTasks(ctx, queries, taskSvc, bus)
+			sweepStaleWebhookTasks(ctx, queries, taskSvc)
 			sweepExpiredQueuedTasks(ctx, queries, taskSvc)
 			sweepDeferredChatFinalizations(ctx, queries, taskSvc)
 			gcRuntimes(ctx, queries, bus)
@@ -287,6 +325,36 @@ func sweepStaleTasks(ctx context.Context, queries *db.Queries, taskSvc *service.
 	slog.Info("task sweeper: failed stale tasks", "count", len(failedTasks))
 	taskSvc.CaptureLeaseExpiredTasks(ctx, failedTasks)
 	taskSvc.HandleFailedTasks(ctx, failedTasks)
+}
+
+// sweepStaleWebhookTasks is the webhook-runtime counterpart to
+// sweepStaleTasks. It exists because a webhook runtime proves nothing about
+// itself between callbacks — no daemon, no prepare lease, no heartbeat — so
+// neither of sweepStaleTasks' liveness guards can ever hold for one, and both
+// of its wall clocks were firing on webhook rows unconditionally at thresholds
+// chosen for a daemon. FailStaleTasks now excludes webhook rows; this owns
+// them, with deadlines sized against the GitHub Actions job's real bounds.
+//
+// The failure is routed through HandleFailedWebhookTasks rather than
+// HandleFailedTasks so a card whose last task died parks at `blocked` with a
+// reason comment instead of being silently reset to `todo` — the whole point
+// of the exercise, since a webhook card reset to todo is indistinguishable
+// from one nobody has picked up, and nothing will re-claim it on its own.
+func sweepStaleWebhookTasks(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService) {
+	failedTasks, err := queries.FailStaleWebhookTasks(ctx, db.FailStaleWebhookTasksParams{
+		DispatchTimeoutSecs: webhookDispatchTimeoutSeconds,
+		RunningTimeoutSecs:  webhookRunningTimeoutSeconds,
+	})
+	if err != nil {
+		slog.Warn("webhook task sweeper: failed to clean up stale webhook tasks", "error", err)
+		return
+	}
+	if len(failedTasks) == 0 {
+		return
+	}
+
+	slog.Info("webhook task sweeper: failed stale webhook tasks", "count", len(failedTasks))
+	taskSvc.HandleFailedWebhookTasks(ctx, failedTasks)
 }
 
 // sweepExpiredQueuedTasks fails tasks that have been sitting in 'queued' for
