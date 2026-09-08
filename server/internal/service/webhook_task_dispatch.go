@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/util"
+	agentpkg "github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -80,8 +81,59 @@ func (s *TaskService) buildWebhookAgentData(ctx context.Context, agent db.Agent)
 		data.McpConfig = json.RawMessage(agent.McpConfig)
 	}
 
+	data.CustomEnv = applyEngineBaseURL(
+		data.CustomEnv, data.Model, data.ID,
+		agentpkg.LoadEngineCatalog(ctx),
+	)
+
 	data.Skills = s.LoadAgentSkills(ctx, agent.ID)
 	return data
+}
+
+// engineBaseURLKey is the custom_env key that carries the other half of the
+// engine. Multica's agent resource has no base-URL field of its own, and
+// deliberately gains none: custom_env is the channel that reaches the runner,
+// and the value is DERIVED from the model rather than chosen beside it.
+const engineBaseURLKey = "ANTHROPIC_BASE_URL"
+
+// applyEngineBaseURL pins the dispatched agent's base URL to the one its model
+// belongs to. This is what makes (model, base_url) inseparable: the picker
+// offers models, and the URL follows from the catalogue here — there is no
+// path by which a user sets one without the other.
+//
+// Three cases, and the third is the one that matters:
+//
+//   - model is in the catalogue: write its base URL. Anthropic entries carry
+//     an empty string, which is written explicitly rather than omitted — the
+//     runner reads the key with `// ""` either way, and an explicit empty
+//     matches what the pipeline reconciler writes, so drift detection stays
+//     quiet.
+//   - model is not in the catalogue and the catalogue is COMPLETE: the model
+//     is not one of ours, so it is Anthropic's. Write empty.
+//   - the catalogue is degraded (the proxy has never answered): leave whatever
+//     the agent already carries. "Not in the catalogue" and "the catalogue is
+//     missing half its entries" are indistinguishable here, and clearing the
+//     URL on the second would dispatch a proxied agent to Anthropic with a
+//     model name Anthropic has never heard of — which surfaces as "the model
+//     does not exist" and sends whoever debugs it after the model string.
+func applyEngineBaseURL(env map[string]string, model, agentID string, catalog agentpkg.Catalog) map[string]string {
+	if engine, ok := catalog.Lookup(model); ok {
+		if env == nil {
+			env = map[string]string{}
+		}
+		env[engineBaseURLKey] = engine.BaseURL
+		return env
+	}
+	if !catalog.ProxyOK {
+		slog.Warn("webhook: engine catalogue degraded, leaving base URL as configured",
+			"agent_id", agentID, "model", model, "base_url", env[engineBaseURLKey])
+		return env
+	}
+	if env == nil {
+		env = map[string]string{}
+	}
+	env[engineBaseURLKey] = ""
+	return env
 }
 
 // webhookIssueData carries the issue context the receiver needs to build a

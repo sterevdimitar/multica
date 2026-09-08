@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	agentpkg "github.com/multica-ai/multica/server/pkg/agent"
 )
 
 // ---------------------------------------------------------------------------
@@ -283,8 +284,49 @@ func modelListRequestTerminal(status ModelListStatus) bool {
 // Handlers
 // ---------------------------------------------------------------------------
 
+// webhookEngineModelListRequest answers a list-models request for a webhook
+// runtime from the server-side engine catalogue, with no daemon involved.
+//
+// A webhook runtime has no daemon and never heartbeats — the online sweeper
+// excludes it by design (runtime.sql, SelectStaleOnlineRuntimes). The pending
+// request this endpoint normally creates is claimed only in the daemon
+// heartbeat handler, so for a webhook runtime nothing ever popped it: it aged
+// into `timeout` after 30 seconds, the query threw, and the picker rendered
+// "No models available" for EVERY provider, Anthropic included. Answering
+// synchronously here is the whole fix — the request never enters the store,
+// so there is nothing to time out.
+//
+// Supported is true: a webhook runtime honours `--model` exactly like the
+// daemon path (the runner passes task.agent.model straight to the CLI).
+func webhookEngineModelListRequest(ctx context.Context, runtimeID string) *ModelListRequest {
+	catalog := agentpkg.LoadEngineCatalog(ctx)
+	models := catalog.Models()
+	entries := make([]ModelEntry, 0, len(models))
+	for _, m := range models {
+		entries = append(entries, ModelEntry{
+			ID:       m.ID,
+			Label:    m.Label,
+			Provider: m.Provider,
+			Default:  m.Default,
+		})
+	}
+
+	now := time.Now()
+	return &ModelListRequest{
+		ID:        randomID(),
+		RuntimeID: runtimeID,
+		Status:    ModelListCompleted,
+		Models:    entries,
+		Supported: true,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
 // InitiateListModels creates a pending model list request for a runtime.
 // Called by the frontend; the daemon picks it up on its next heartbeat.
+// Webhook runtimes have no daemon and are answered inline instead — see
+// webhookEngineModelListRequest.
 func (h *Handler) InitiateListModels(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
@@ -298,6 +340,15 @@ func (h *Handler) InitiateListModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := h.requireWorkspaceMember(w, r, uuidToString(rt.WorkspaceID), "runtime not found"); !ok {
+		return
+	}
+	// Deliberately ahead of the online check. A webhook runtime's status says
+	// nothing about model discovery: the catalogue is assembled server-side
+	// and is identical whether or not the receiver is reachable right now.
+	// Gating on status here would reintroduce the empty picker for the one
+	// runtime kind whose liveness the server cannot observe.
+	if rt.RuntimeMode == "webhook" {
+		writeJSON(w, http.StatusOK, webhookEngineModelListRequest(r.Context(), uuidToString(rt.ID)))
 		return
 	}
 	if rt.Status != "online" {

@@ -76,12 +76,11 @@ export type AgentColumnKey =
   | "model"
   | "created";
 
-/** Model and created are opt-in: hidden until the user enables them. Owner
- *  is shown by default (the user wants to see who owns each agent). */
-export const AGENT_DEFAULT_HIDDEN_COLUMNS: AgentColumnKey[] = [
-  "model",
-  "created",
-];
+/** Created is opt-in: hidden until the user enables it. Owner and model are
+ *  shown by default — model because an agent's engine (which model, and so
+ *  which provider) is now selectable per agent, and a column nobody can see
+ *  is a setting nobody can audit. */
+export const AGENT_DEFAULT_HIDDEN_COLUMNS: AgentColumnKey[] = ["created"];
 
 export interface AgentsViewState {
   scope: AgentsScope;
@@ -166,6 +165,24 @@ export const useAgentsViewStore = create<AgentsViewState>()(
       storage: createJSONStorage(() =>
         createWorkspaceAwareStorage(defaultStorage),
       ),
+      // v1: "model" left AGENT_DEFAULT_HIDDEN_COLUMNS. Changing the default
+      // alone would be invisible to anyone who has already loaded the agents
+      // page — hiddenColumns is persisted, so every existing browser keeps its
+      // snapshot with "model" in it and the column stays hidden forever.
+      // Dropping the key on migration is safe because a user who deliberately
+      // hid the column can hide it again, whereas a user who never had the
+      // choice cannot discover it.
+      version: 1,
+      migrate: (persisted, fromVersion) => {
+        const p = (persisted ?? {}) as Partial<AgentsViewState>;
+        if (fromVersion >= 1) return p;
+        return {
+          ...p,
+          hiddenColumns: (p.hiddenColumns ?? AGENT_DEFAULT_HIDDEN_COLUMNS).filter(
+            (key) => key !== "model",
+          ),
+        };
+      },
       partialize: (state) => ({
         scope: state.scope,
         sortField: state.sortField,

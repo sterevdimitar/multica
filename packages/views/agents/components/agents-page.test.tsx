@@ -105,7 +105,7 @@ vi.mock("@multica/core/agents", () => ({
 vi.mock("@multica/core/agents/stores", () => ({
   useAgentsViewStore: (selector: (state: unknown) => unknown) =>
     selector(mocks.viewState),
-  AGENT_DEFAULT_HIDDEN_COLUMNS: ["model", "created"],
+  AGENT_DEFAULT_HIDDEN_COLUMNS: ["created"],
   AGENT_SCOPES: ["mine", "all", "archived"],
 }));
 

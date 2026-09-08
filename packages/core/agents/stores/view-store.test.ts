@@ -122,6 +122,56 @@ describe("useAgentsViewStore", () => {
     expect(filters.availability).toEqual(["online"]);
   });
 
+  describe("hiddenColumns migration to v1", () => {
+    it("drops 'model' from a v0 payload so the column becomes visible", async () => {
+      // hiddenColumns is persisted, so changing the default alone is
+      // invisible to every browser that has already loaded the agents page:
+      // it keeps its v0 snapshot and the model column stays hidden forever.
+      localStorage.setItem(
+        "multica_agents_view:acme",
+        JSON.stringify({
+          state: { hiddenColumns: ["model", "created"] },
+          version: 0,
+        }),
+      );
+
+      setCurrentWorkspace("acme", "ws_a");
+      await flush();
+      await flush();
+
+      expect(useAgentsViewStore.getState().hiddenColumns).toEqual(["created"]);
+    });
+
+    it("leaves a v1 payload alone, so re-hiding the column sticks", async () => {
+      localStorage.setItem(
+        "multica_agents_view:acme",
+        JSON.stringify({
+          state: { hiddenColumns: ["model"] },
+          version: 1,
+        }),
+      );
+
+      setCurrentWorkspace("acme", "ws_a");
+      await flush();
+      await flush();
+
+      expect(useAgentsViewStore.getState().hiddenColumns).toEqual(["model"]);
+    });
+
+    it("defaults a v0 payload that never stored hiddenColumns", async () => {
+      localStorage.setItem(
+        "multica_agents_view:acme",
+        JSON.stringify({ state: { scope: "all" }, version: 0 }),
+      );
+
+      setCurrentWorkspace("acme", "ws_a");
+      await flush();
+      await flush();
+
+      expect(useAgentsViewStore.getState().hiddenColumns).toEqual(["created"]);
+    });
+  });
+
   describe("access filter dimension", () => {
     it("EMPTY_AGENT_FILTERS initializes access to []", async () => {
       const { EMPTY_AGENT_FILTERS } = await import("./view-store");
