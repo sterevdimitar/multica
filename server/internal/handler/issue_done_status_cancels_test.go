@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // The `done` carve-out from MUL-4465.
@@ -105,5 +108,49 @@ func TestBatchUpdateIssueDoneStatusCancelsActiveTasks(t *testing.T) {
 		if got := taskStatus(t, taskID); got != "cancelled" {
 			t.Fatalf("%s task must be cancelled by batch issue → done, got status %q", status, got)
 		}
+	}
+}
+
+// TestAdvanceIssueToDoneCancelsActiveTasks covers the THIRD writer of `done`.
+//
+// The two tests above drive the HTTP write paths — a human dragging a card, or
+// a multi-select batch. This one drives the path that had no coverage and, on
+// 2026-09-10, let a real card through: Multica's GitHub App integration moves a
+// card to `done` when a human merges a pull request carrying "Closes MUL-N",
+// and it does that through advanceIssueToDone rather than UpdateIssue. Card
+// MUL-183 was merged that way with three agent runs live; the activity log
+// recorded `system` / `github_pr_merged` writing `done` and nothing stopped
+// them.
+//
+// advanceIssueToDone needs no status guard of its own: its single caller
+// already skips issues that are `done` or `cancelled`, so reaching here IS the
+// transition. If a second caller is ever added, it must preserve that.
+func TestAdvanceIssueToDoneCancelsActiveTasks(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ownerAgent := createHandlerTestAgent(t, "AdvanceDoneCancelsOwner", []byte("[]"))
+
+	for i, status := range activeTaskStatuses {
+		t.Run(status, func(t *testing.T) {
+			issueID := insertAgentAssignedIssue(t, ownerAgent, 92170+i, "advance-done-cancels-"+status)
+			task := insertIssueTaskWithStatus(t, ownerAgent, issueID, status)
+
+			var id pgtype.UUID
+			if err := id.Scan(issueID); err != nil {
+				t.Fatalf("parse issue id: %v", err)
+			}
+			issue, err := testHandler.Queries.GetIssue(context.Background(), id)
+			if err != nil {
+				t.Fatalf("load issue: %v", err)
+			}
+
+			testHandler.advanceIssueToDone(context.Background(), issue, testWorkspaceID)
+
+			if got := taskStatus(t, task); got != "cancelled" {
+				t.Fatalf("%s task must be cancelled by a merged PR advancing the card to done, got status %q", status, got)
+			}
+		})
 	}
 }

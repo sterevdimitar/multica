@@ -1371,6 +1371,27 @@ func (h *Handler) advanceIssueToDone(ctx context.Context, issue db.Issue, worksp
 		return
 	}
 
+	// The `done` carve-out from MUL-4465, third and last writer. See the long
+	// comment in UpdateIssue for why `done` — and only `done` — cancels.
+	//
+	// THIS PATH IS THE ONE THAT GOT MISSED, and it is the dominant one: a
+	// human merging a pull request on github.com is how most cards actually
+	// reach `done`, and it arrives here rather than through UpdateIssue. Card
+	// MUL-183 (2026-09-10) was merged with three agent runs live and nothing
+	// stopped them, because the carve-out existed only on the HTTP paths.
+	//
+	// No status guard here: the single caller already skips issues that are
+	// `done` or `cancelled`, so reaching this function IS the transition. A
+	// second caller must preserve that, or gain its own guard — cancelling on
+	// a card that was already `done` would kill runs a human started there on
+	// purpose.
+	//
+	// Best-effort, never fatal, exactly as on the HTTP paths: the status write
+	// above already landed and is the source of truth.
+	if err := h.TaskService.CancelTasksForIssue(ctx, issue.ID); err != nil {
+		slog.Error("cancel tasks on github-merged issue → done", "err", err, "issue_id", uuidToString(issue.ID))
+	}
+
 	// Fire the platform parent-notification path on the same transition the
 	// HTTP UpdateIssue / BatchUpdateIssues paths use. A merged PR is one of
 	// the most common ways a sub-issue actually reaches `done`, and skipping
