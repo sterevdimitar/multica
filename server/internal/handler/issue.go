@@ -2807,6 +2807,35 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	// (MUL-2538 — replaces the agent-prompt rule that caused self-mention
 	// loops in PR #2918). The helper guards on transition + parent state and
 	// fails best-effort.
+	// The `done` carve-out from MUL-4465 (dev-command-center, 2026-09-10).
+	//
+	// The comment above states the rule this breaks: no status change cancels
+	// active tasks. That rule is kept for every status but `done`, `cancelled`
+	// very much included — see TestUpdateIssueCancelStatusDoesNotCancelActiveTasks,
+	// which must stay green.
+	//
+	// `done` is different because in this deployment it is not a tidy-up, it is
+	// an instruction: the merge reconciler treats a card reaching `done` as
+	// "merge this pull request" and acts within 60 seconds. A human dragging a
+	// card there while a chain is running is saying "stop deliberating and ship
+	// it", and merging a branch an agent is still editing is the failure being
+	// removed. The sweep is issue-scoped on purpose: a `done` card stops every
+	// agent working it, not only its assignee.
+	//
+	// BEST-EFFORT, NEVER FATAL. The status write is the source of truth; a lost
+	// cancel costs at most one bounded run finishing uselessly, which is the
+	// behaviour this replaces. Failing the PUT would make a transient queue
+	// error look like a rejected drag.
+	//
+	// It cannot cancel the run doing the writing: the pipeline's runner-side
+	// writers close their task via /complete BEFORE writing status, so the row
+	// is already terminal and outside the sweep.
+	if statusChanged && issue.Status == "done" {
+		if err := h.TaskService.CancelTasksForIssue(r.Context(), issue.ID); err != nil {
+			slog.Error("cancel tasks on issue → done", "err", err, "issue_id", id, "workspace_id", workspaceID)
+		}
+	}
+
 	if statusChanged {
 		h.notifyParentOfChildDone(r.Context(), prevIssue, issue)
 	}
@@ -3311,6 +3340,17 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		// notifyParentsOfBatchChildDone below evaluate each parent once against
 		// the batch's final committed state. Same transition guard as
 		// notifyParentOfChildDone: a non-terminal -> terminal move on a child.
+		// The `done` carve-out from MUL-4465, mirrored from UpdateIssue.
+		// See the long comment there for why `done` — and only `done` —
+		// cancels. A carve-out applied to one write path and not the other is
+		// a card that stops its runs when dragged singly and does not when
+		// dragged in a multi-select.
+		if statusChanged && issue.Status == "done" {
+			if err := h.TaskService.CancelTasksForIssue(r.Context(), issue.ID); err != nil {
+				slog.Error("cancel tasks on batch issue → done", "err", err, "issue_id", uuidToString(issue.ID))
+			}
+		}
+
 		if statusChanged && issue.ParentIssueID.Valid &&
 			!isTerminalChildStatus(prevIssue.Status) && isTerminalChildStatus(issue.Status) {
 			childDoneCompleted = append(childDoneCompleted, issue)
