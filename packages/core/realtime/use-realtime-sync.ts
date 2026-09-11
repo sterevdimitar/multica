@@ -738,6 +738,16 @@ export function useRealtimeSync(
         // shape as the tasks invalidation above — any task lifecycle
         // event shifts the aggregated usage numbers.
         qc.invalidateQueries({ queryKey: ["issues", "usage"] });
+        // Per-issue step progress (the board card's popover). Its only
+        // other writer is the task:usage fold, which moves the numbers of
+        // steps already in the cache and deliberately never fabricates a
+        // row — so without this, an OPEN popover kept showing a finished
+        // step as live and never learned about the step that started next
+        // (MUL-124). Lifecycle events are the signal that the ROW SET
+        // changed; the refetch is what heals it. task:usage stays out of
+        // this path (see specificEvents), so a 30s tick per running task
+        // cannot turn into a refetch per tick.
+        qc.invalidateQueries({ queryKey: issueKeys.progressAll() });
         // Squad members-status reads the same task lifecycle to flip
         // working ↔ idle for each agent member.
         invalidateSquadMemberStatusQueries(qc, wsId);

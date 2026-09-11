@@ -330,3 +330,64 @@ describe("useRealtimeSync — task:usage", () => {
     }
   });
 });
+
+// The progress popover's query key is written by exactly one thing — the
+// task:usage fold above — and that fold never fabricates a row. So while the
+// popover is open, a step that COMPLETES kept rendering as live and a step
+// that STARTED afterwards never appeared (MUL-124, 2026-08-30: `review` still
+// "running" while the header chip already showed the readiness judge agent).
+// Lifecycle events must make the projection refetch; task:usage must not.
+describe("useRealtimeSync — task lifecycle refreshes the progress projection", () => {
+  let qc: QueryClient;
+  let stores: RealtimeSyncStores;
+
+  beforeEach(() => {
+    qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    stores = createStores();
+  });
+
+  const progressKeys = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls
+      .map((c: unknown[]) => (c[0] as { queryKey?: unknown } | undefined)?.queryKey)
+      .filter((k: unknown) => JSON.stringify(k) === JSON.stringify(["issues", "progress"]));
+
+  for (const type of ["task:running", "task:completed", "task:failed", "task:cancelled"]) {
+    it(`refetches every issue's progress on ${type}`, () => {
+      vi.useFakeTimers();
+      try {
+        const { ws, emit } = createEmittableWs();
+        renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+
+        const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+        emit(type, { task_id: "t9", issue_id: "i1" });
+        // The task: prefix path is debounced; let it fire.
+        vi.advanceTimersByTime(500);
+
+        expect(progressKeys(invalidateSpy)).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
+  it("does not refetch progress on task:usage (a 30s tick per running task)", () => {
+    vi.useFakeTimers();
+    try {
+      const { ws, emit } = createEmittableWs();
+      renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+
+      const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+      emit("task:usage", {
+        task_id: "t2",
+        issue_id: "i1",
+        tokens: { input: 1, output: 1, cache_creation: 0, cache_read: 0 },
+        turns: 1,
+      });
+      vi.advanceTimersByTime(5_000);
+
+      expect(progressKeys(invalidateSpy)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

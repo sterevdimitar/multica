@@ -76,7 +76,8 @@ export function formatElapsed(ms: number | null): string {
  * Fetch-on-open: this component mounts when the hover card opens, so the
  * query fires then rather than on every card render. While it is open the
  * task:usage WS handler writes the same cache key, so the numbers stay live
- * without polling.
+ * without polling; task lifecycle events invalidate it, so a step finishing
+ * or starting shows up too.
  *
  * Read-only throughout — it renders what the run already did and never
  * writes status, comments, or assignees.

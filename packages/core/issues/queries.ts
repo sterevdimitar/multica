@@ -120,7 +120,9 @@ export const issueKeys = {
   tasks: (issueId: string) => [...issueKeys.tasksAll(), issueId] as const,
   progressAll: () => ["issues", "progress"] as const,
   /** Per-issue step progress (elapsed / tokens / turns). Fetched when the
-   *  progress popover opens and kept fresh by the task:usage WS handler. */
+   *  progress popover opens; the task:usage WS handler moves the numbers of
+   *  steps already cached, and any task lifecycle event (task: prefix path)
+   *  invalidates progressAll so a step that finishes or starts is refetched. */
   progress: (issueId: string) => [...issueKeys.progressAll(), issueId] as const,
   liveUsageAll: () => ["issues", "live-usage"] as const,
   /** WS-only cache: written exclusively by the task:usage handler and read
@@ -659,7 +661,8 @@ export function issueTasksOptions(issueId: string) {
 
 /**
  * Per-step progress. Fetched on popover open; the task:usage WS handler
- * writes the same key so an open popover stays live without polling.
+ * writes the same key so an open popover's numbers stay live without
+ * polling, and task lifecycle events invalidate it so its ROW SET does too.
  */
 export function issueProgressOptions(issueId: string) {
   return queryOptions({
