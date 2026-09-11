@@ -27,20 +27,20 @@ import {
   dashboardAgentRunTimeOptions,
   dashboardRunTimeDailyOptions,
 } from "@multica/core/dashboard";
-import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import { useViewingTimezone } from "../../common/use-viewing-timezone";
 import { PageHeader } from "../../layout/page-header";
 import { KpiCard } from "../../runtimes/components/shared";
 import {
-  DailyCostChart,
   DailyTokensChart,
   DailyTimeChart,
   DailyTasksChart,
-  WeeklyCostChart,
   WeeklyTokensChart,
   WeeklyTimeChart,
   WeeklyTasksChart,
 } from "../../runtimes/components/charts";
+// The cost charts are the dashboard's own: one stored-cost series, not the
+// runtimes page's estimated input / output / cache-write stack.
+import { DailyCostChart, WeeklyCostChart } from "./charts";
 import { ProjectIcon } from "../../projects/components/project-icon";
 import { ActorAvatar } from "../../common/actor-avatar";
 import {
@@ -54,6 +54,7 @@ import {
   aggregateAgentTokens,
   aggregateDailyCost,
   aggregateDailyTasks,
+  aggregateWeeklyCost,
   aggregateDailyTime,
   aggregateDailyTokens,
   aggregateWeeklyTasks,
@@ -207,10 +208,6 @@ export function DashboardPage() {
     if (!stillAllowed) setDays(DEFAULT_DAYS_BY_DIM[next]);
   };
 
-  // The user can save model prices from the runtimes page; re-render when
-  // they do so the dashboard reflects the new rates.
-  useCustomPricingStore((s) => s.pricings);
-
   const { data: projects = [] } = useQuery(projectListOptions(wsId));
   const agentsQuery = useQuery(agentListOptions(wsId));
   const agents = agentsQuery.data ?? EMPTY_AGENTS;
@@ -289,7 +286,8 @@ export function DashboardPage() {
     runTimeRows.length === 0 &&
     runTimeDailyRows.length === 0;
 
-  // Cost / token math — re-derived when usage, days, or pricings change.
+  // Cost / token math — re-derived when usage or days change. Cost is the
+  // stored figure summed, so no price table is an input here.
   const totals = useMemo(
     () => computeDailyTotals(dailyUsageInWindow),
     [dailyUsageInWindow],
@@ -321,8 +319,12 @@ export function DashboardPage() {
     () => aggregateByWeek(dailyUsage, viewTZ, weekCount),
     [dailyUsage, viewTZ, weekCount],
   );
-  const weeklyCost = weekly.weeklyCostStack;
   const weeklyTokens = weekly.weeklyTokens;
+  // Stored cost summed into the SAME decorated weeks as the tokens chart.
+  const weeklyCost = useMemo(
+    () => aggregateWeeklyCost(dailyUsage, weeklyTokens),
+    [dailyUsage, weeklyTokens],
+  );
   const weeklyTime = useMemo(
     () => aggregateWeeklyTime(runTimeDailyRows, viewTZ, weekCount),
     [runTimeDailyRows, viewTZ, weekCount],
@@ -595,7 +597,7 @@ function TrendBlock({
   dailyTokens: ReturnType<typeof aggregateDailyTokens>;
   dailyTime: ReturnType<typeof aggregateDailyTime>;
   dailyTasks: ReturnType<typeof aggregateDailyTasks>;
-  weeklyCost: ReturnType<typeof aggregateByWeek>["weeklyCostStack"];
+  weeklyCost: ReturnType<typeof aggregateWeeklyCost>;
   weeklyTokens: ReturnType<typeof aggregateByWeek>["weeklyTokens"];
   weeklyTime: ReturnType<typeof aggregateWeeklyTime>;
   weeklyTasks: ReturnType<typeof aggregateWeeklyTasks>;

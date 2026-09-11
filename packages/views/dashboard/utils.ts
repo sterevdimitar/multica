@@ -6,12 +6,11 @@ import type {
 } from "@multica/core/types";
 import {
   addDaysIso,
-  estimateCost,
-  estimateCostBreakdown,
   formatShortDate,
   todayIso,
   weekStartIso,
   type DailyTokenData,
+  type WeeklyTokenData,
 } from "../runtimes/utils";
 import type {
   DailyTimeData,
@@ -24,20 +23,22 @@ import type {
 // Dashboard data aggregations
 //
 // The workspace dashboard returns the same per-(date, model) and
-// per-(agent, model) shapes the runtime page does, so cost math reuses
-// `estimateCost` / `estimateCostBreakdown` from the runtimes utils. What
-// the runtimes view does with `aggregateByDate` (works on RuntimeUsage,
-// which carries a `provider` field) we replicate here with a tighter
-// type — fewer optional fields, less conditional logic on the consumer
-// side.
+// per-(agent, model) shapes the runtime page does, PLUS the stored
+// `total_cost_usd` rolled up from task_usage — and every dollar figure here
+// is a sum of that stored value. This package deliberately does NOT import
+// the runtimes utils' client-side price estimators: the pipeline prices each
+// run by the engine that actually ran it, with a rate table the fork's own
+// price table does not have (it knows `glm-5`, not the LiteLLM aliases
+// `dcc-glm-*`), so estimating here is how GLM spend came to read as $0 while
+// the card showed it at 33x. A null cost contributes nothing and is never
+// replaced by a guess. A test greps this file for the estimator's name to
+// keep it that way — which is also why this comment does not spell it.
 // ---------------------------------------------------------------------------
 
-export interface DailyCostStack {
+/** One point of the daily cost chart: the stored cost summed over the day. */
+export interface DailyCostPoint {
   date: string;
   label: string;
-  input: number;
-  output: number;
-  cacheWrite: number;
   total: number;
 }
 
@@ -50,36 +51,55 @@ function formatDateLabel(d: string): string {
   return `${date.getMonth() + 1}/${date.getDate()}`;
 }
 
-// Per-(date, model) rows → 1 row per date with cost broken into the three
-// segments the stacked bar chart consumes. Stable sort by date asc so the
-// chart x-axis is left-to-right oldest-to-newest.
-export function aggregateDailyCost(usage: DashboardUsageDaily[]): DailyCostStack[] {
-  const map = new Map<string, { input: number; output: number; cacheWrite: number }>();
+// Per-(date, model) rows → 1 point per date: the STORED cost summed across
+// models. One series, not the input / output / cache-write stack the runtime
+// page draws — the stored figure is a total, and it is not fabricated back
+// into parts. Stable sort by date asc so the chart x-axis reads oldest →
+// newest.
+export function aggregateDailyCost(usage: DashboardUsageDaily[]): DailyCostPoint[] {
+  const map = new Map<string, number>();
   for (const u of usage) {
-    const b = estimateCostBreakdown(u);
-    const entry = map.get(u.date) ?? { input: 0, output: 0, cacheWrite: 0 };
-    entry.input += b.input;
-    entry.output += b.output;
-    entry.cacheWrite += b.cacheWrite;
-    map.set(u.date, entry);
+    map.set(u.date, (map.get(u.date) ?? 0) + (u.total_cost_usd ?? 0));
   }
-  const round = (n: number) => Math.round(n * 100) / 100;
   return Array.from(map.entries())
     .toSorted(([a], [b]) => a.localeCompare(b))
-    .map(([date, s]) => {
-      const input = round(s.input);
-      const output = round(s.output);
-      const cacheWrite = round(s.cacheWrite);
-      return {
-        date,
-        label: formatDateLabel(date),
-        input,
-        output,
-        cacheWrite,
-        total: round(input + output + cacheWrite),
-      };
-    });
+    .map(([date, total]) => ({ date, label: formatDateLabel(date), total: round2(total) }));
 }
+
+/** One bar of the weekly cost chart: a decorated week plus its stored cost. */
+export type WeeklyCostPoint = Pick<
+  WeeklyTokenData,
+  "weekStart" | "weekEnd" | "label" | "rangeLabel" | "partial" | "daysCovered"
+> & { total: number };
+
+// The stored cost summed into the weeks `aggregateByWeek` already decorated
+// for the tokens chart (same window, same partial-week flag), so the two
+// weekly charts are the same weeks by construction. A row outside those
+// weeks is dropped, exactly as aggregateByWeek drops it.
+export function aggregateWeeklyCost(
+  usage: DashboardUsageDaily[],
+  weeks: WeeklyTokenData[],
+): WeeklyCostPoint[] {
+  const totals = new Map<string, number>(weeks.map((w) => [w.weekStart, 0]));
+  for (const u of usage) {
+    const wk = weekStartIso(u.date);
+    if (!totals.has(wk)) continue;
+    totals.set(wk, (totals.get(wk) ?? 0) + (u.total_cost_usd ?? 0));
+  }
+  return weeks
+    .toSorted((a, b) => a.weekStart.localeCompare(b.weekStart))
+    .map(({ weekStart, weekEnd, label, rangeLabel, partial, daysCovered }) => ({
+      weekStart,
+      weekEnd,
+      label,
+      rangeLabel,
+      partial,
+      daysCovered,
+      total: round2(totals.get(weekStart) ?? 0),
+    }));
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 // Per-(date, model) rows → 1 row per date with raw token counts split
 // across the four chart segments. Independent of pricing — unmapped
@@ -138,7 +158,7 @@ export function computeDailyTotals(usage: DashboardUsageDaily[]): DashboardToken
       output: acc.output + u.output_tokens,
       cacheRead: acc.cacheRead + u.cache_read_tokens,
       cacheWrite: acc.cacheWrite + u.cache_write_tokens,
-      cost: acc.cost + estimateCost(u),
+      cost: acc.cost + (u.total_cost_usd ?? 0),
       taskCount: acc.taskCount + u.task_count,
     }),
     { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, taskCount: 0 },
@@ -152,9 +172,10 @@ export interface AgentCostRow {
   taskCount: number;
 }
 
-// Fold per-(agent, model) rows into one row per agent. Cost is the sum
-// across this agent's models, which is the figure the user cares about.
-// Sort by cost desc so the heaviest spender lands first.
+// Fold per-(agent, model) rows into one row per agent. Cost is the STORED
+// sum across this agent's models (null contributes nothing), which is the
+// figure the user cares about. Sort by cost desc so the heaviest spender
+// lands first.
 export function aggregateAgentTokens(rows: DashboardUsageByAgent[]): AgentCostRow[] {
   const map = new Map<string, AgentCostRow>();
   for (const r of rows) {
@@ -166,7 +187,7 @@ export function aggregateAgentTokens(rows: DashboardUsageByAgent[]): AgentCostRo
     };
     entry.tokens +=
       r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens;
-    entry.cost += estimateCost(r);
+    entry.cost += r.total_cost_usd ?? 0;
     entry.taskCount += r.task_count;
     map.set(r.agent_id, entry);
   }

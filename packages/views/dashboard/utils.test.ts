@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   aggregateAgentTokens,
   aggregateDailyCost,
+  aggregateWeeklyCost,
   aggregateWeeklyTasks,
   aggregateWeeklyTime,
   bucketUnknownAgentRows,
@@ -12,53 +15,108 @@ import {
 } from "./utils";
 
 describe("aggregateDailyCost", () => {
-  it("collapses multiple rows per day into one stack and sorts by date asc", () => {
+  it("sums the STORED cost per day and sorts by date asc", () => {
     const result = aggregateDailyCost([
       {
         date: "2026-05-10",
-        provider: "claude",
-        model: "claude-sonnet-4-6",
+        provider: "anthropic",
+        model: "claude-opus-4-6",
         input_tokens: 1_000_000,
         output_tokens: 500_000,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: 3.35,
         task_count: 3,
       },
       {
+        date: "2026-05-10",
+        provider: "anthropic",
+        model: "dcc-glm-high",
+        input_tokens: 683_300,
+        output_tokens: 15_129,
+        cache_read_tokens: 1_578_368,
+        cache_write_tokens: 0,
+        total_cost_usd: 0.157,
+        task_count: 1,
+      },
+      {
         date: "2026-05-09",
-        provider: "claude",
-        model: "claude-sonnet-4-6",
+        provider: "anthropic",
+        model: "claude-opus-4-6",
         input_tokens: 1_000_000,
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: 3,
         task_count: 1,
       },
     ]);
-
-    // Sort: oldest day first.
     expect(result.map((r) => r.date)).toEqual(["2026-05-09", "2026-05-10"]);
-    // claude-sonnet-4-6: input $3/M, output $15/M.
-    // 2026-05-09 → 1M input × $3 = $3 input, $0 output, $0 cache.
-    expect(result[0]).toMatchObject({ input: 3, output: 0, cacheWrite: 0, total: 3 });
-    // 2026-05-10 → $3 input + (0.5M × $15) = $7.5 output. Total $10.5.
-    expect(result[1]).toMatchObject({ input: 3, output: 7.5, cacheWrite: 0, total: 10.5 });
+    expect(result[0]).toMatchObject({ total: 3 });
+    // Two models on the same day fold into one point: 3.35 + 0.157 → $3.51
+    expect(result[1]).toMatchObject({ total: 3.51 });
   });
 
-  it("treats unmapped models as zero-cost", () => {
+  // I7: a null contributes nothing and is never replaced by an estimate —
+  // estimating from the fork's own price table is exactly what produced $0
+  // for GLM, because that table does not know the pipeline's engine aliases.
+  it("lets an unpriced row contribute nothing, and never estimates", () => {
     const result = aggregateDailyCost([
       {
         date: "2026-05-10",
-        provider: "claude",
-        model: "made-up-model",
+        provider: "anthropic",
+        model: "dcc-glm-max",
         input_tokens: 999_999_999,
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: null,
         task_count: 0,
       },
+      {
+        date: "2026-05-10",
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        input_tokens: 1,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        total_cost_usd: 0.25,
+        task_count: 1,
+      },
     ]);
-    expect(result[0]?.total).toBe(0);
+    expect(result[0]?.total).toBe(0.25);
+  });
+});
+
+describe("aggregateWeeklyCost", () => {
+  it("sums stored cost into the decorated weeks it is given, null contributing nothing", () => {
+    const weeks = [
+      { weekStart: "2026-05-04", weekEnd: "2026-05-10", label: "May 4", rangeLabel: "May 4 – May 10", partial: false, daysCovered: 7, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      { weekStart: "2026-05-11", weekEnd: "2026-05-17", label: "May 11", rangeLabel: "May 11 – May 17", partial: true, daysCovered: 3, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    ];
+    const row = (date: string, total_cost_usd: number | null) => ({
+      date, provider: "anthropic", model: "claude-opus-4-6",
+      input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
+      total_cost_usd, task_count: 1,
+    });
+    const result = aggregateWeeklyCost(
+      [row("2026-05-09", 1.5), row("2026-05-10", 0.25), row("2026-05-12", null), row("2026-05-13", 0.1), row("2026-04-01", 99)],
+      weeks,
+    );
+    expect(result).toEqual([
+      expect.objectContaining({ weekStart: "2026-05-04", partial: false, total: 1.75 }),
+      expect.objectContaining({ weekStart: "2026-05-11", partial: true, total: 0.1 }),
+    ]);
+  });
+});
+
+// I7, mechanically: the dashboard package does not estimate. An import is
+// the only way it could, so the source is checked as text. Crude on purpose.
+describe("the dashboard never estimates cost", () => {
+  it("does not import estimateCost or estimateCostBreakdown", () => {
+    const src = readFileSync(resolve(__dirname, "utils.ts"), "utf8");
+    expect(src).not.toMatch(/estimateCost/);
   });
 });
 
@@ -73,6 +131,7 @@ describe("aggregateAgentTokens", () => {
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: 0.3,
         task_count: 1,
       },
       {
@@ -83,6 +142,7 @@ describe("aggregateAgentTokens", () => {
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: 15,
         task_count: 3,
       },
       {
@@ -93,19 +153,22 @@ describe("aggregateAgentTokens", () => {
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: null,
         task_count: 2,
       },
     ]);
 
     expect(rows.map((r) => r.agentId)).toEqual(["big-spender", "small-spender"]);
     expect(rows[0]?.taskCount).toBe(5);
-    // big-spender across two models — verify cost > small-spender's.
-    expect(rows[0]!.cost).toBeGreaterThan(rows[1]!.cost);
+    // big-spender's cost is the STORED sum across its models; the unpriced
+    // haiku row contributes nothing rather than an estimate.
+    expect(rows[0]!.cost).toBe(15);
+    expect(rows[1]!.cost).toBe(0.3);
   });
 });
 
 describe("computeDailyTotals", () => {
-  it("sums tokens across rows and adds estimated cost", () => {
+  it("sums tokens across rows and the stored cost", () => {
     const totals = computeDailyTotals([
       {
         date: "2026-05-10",
@@ -115,6 +178,7 @@ describe("computeDailyTotals", () => {
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: 3,
         task_count: 2,
       },
       {
@@ -125,11 +189,12 @@ describe("computeDailyTotals", () => {
         output_tokens: 0,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        total_cost_usd: 6,
         task_count: 3,
       },
     ]);
     expect(totals.input).toBe(3_000_000);
-    expect(totals.cost).toBe(9); // 3M × $3/M
+    expect(totals.cost).toBe(9); // 3 + 6, stored
     expect(totals.taskCount).toBe(5);
   });
 });

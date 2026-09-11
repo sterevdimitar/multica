@@ -38,6 +38,9 @@ vi.mock("@tanstack/react-query", async () => {
                   output_tokens: 2_000,
                   cache_read_tokens: 0,
                   cache_write_tokens: 0,
+                  // The KPI renders the STORED cost, not an estimate from the
+                  // fork's price table.
+                  total_cost_usd: 0.033,
                   task_count: 2,
                 },
               ]
