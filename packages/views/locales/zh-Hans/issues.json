@@ -530,6 +530,7 @@
     "step": "步骤",
     "elapsed": "耗时",
     "tokens": "令牌",
+    "cost": "费用",
     "turns": "轮次",
     "queued": "排队中",
     "empty": "尚无智能体运行记录",

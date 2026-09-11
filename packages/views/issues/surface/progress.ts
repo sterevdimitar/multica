@@ -24,6 +24,12 @@ export interface ProgressRow {
   tokens: number;
   turns: number;
   /**
+   * Stored cost summed over the group's priced members; null when no member
+   * carried one. Never coerced to 0: $0 reads as "free", and the stored
+   * figure exists precisely to stop wrong numbers on this popover.
+   */
+  costUsd: number | null;
+  /**
    * Turn budget for the group, summed the same way `turns` is. 0 means
    * UNKNOWN — either the agent declares no `--max-turns`, or at least one
    * member of the group does not, which makes the whole denominator
@@ -115,6 +121,7 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
               status: "completed",
               tokens: 0,
               turns: 0,
+              costUsd: null,
               maxTurns: 0,
               failureReason: "",
               elapsedMs: null,
@@ -129,6 +136,11 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
     row.taskIds.push(t.task_id);
     row.tokens += displayTokens(t.tokens);
     row.turns += t.turns;
+    // Wire data, read defensively like failure_reason below: an older
+    // server omits the field and the schema defaults it to null.
+    if (typeof t.cost_usd === "number") {
+      row.costUsd = (row.costUsd ?? 0) + t.cost_usd;
+    }
 
     // The cap aggregates like turns, but one missing cap poisons the group:
     // summing only the members that declare one would print a denominator
@@ -183,17 +195,35 @@ export function completedTotals(rows: ProgressRow[]): {
   elapsedMs: number;
   tokens: number;
   turns: number;
+  /** Sum of the priced completed rows; null when none is priced. */
+  costUsd: number | null;
 } {
   let elapsedMs = 0;
   let tokens = 0;
   let turns = 0;
+  let costUsd: number | null = null;
   for (const r of rows) {
     if (r.status === "live") continue;
     elapsedMs += r.elapsedMs ?? 0;
     tokens += r.tokens;
     turns += r.turns;
+    // An unpriced row contributes nothing and does not turn the total into
+    // a number on its own — three dashes must total a dash, not $0.00.
+    if (r.costUsd !== null) costUsd = (costUsd ?? 0) + r.costUsd;
   }
-  return { elapsedMs, tokens, turns };
+  return { elapsedMs, tokens, turns, costUsd };
+}
+
+/**
+ * Dollars for the popover. null is a dash: it means "not priced", which is
+ * a different fact from "$0.00" and must not be rendered as one. Below a
+ * cent the value is shown as "<$0.01" rather than rounded to "$0.00" — a
+ * GLM step really does cost fractions of a cent, and that is the point.
+ */
+export function formatCost(usd: number | null): string {
+  if (usd === null) return "—";
+  if (usd > 0 && usd < 0.005) return "<$0.01";
+  return `$${usd.toFixed(2)}`;
 }
 
 /**

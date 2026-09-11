@@ -73,6 +73,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:04:00Z",
           tokens: tokens(30_000, 8_000, 234, 900_000),
           turns: 14,
+          cost_usd: 0.157,
           max_turns: 0,
           is_live: false,
         },
@@ -85,6 +86,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: null,
           tokens: tokens(1_000, 200, 34, 5_000),
           turns: 3,
+          cost_usd: null,
           max_turns: 0,
           is_live: true,
         },
@@ -97,9 +99,10 @@ describe("IssueProgressHoverContent", () => {
     const { rerender } = renderContent(<IssueProgressHoverContent issueId="i1" />);
 
     // 30000 + 8000 + 234 = 38234 → "38.2k" (cache reads excluded)
-    expect(rowCells("review")).toEqual(["✓review", "4:00", "38.2k", "14"]);
+    expect(rowCells("review")).toEqual(["✓review", "4:00", "38.2k", "$0.16", "14"]);
     // live row started 10:10:00, now 10:11:30 → 1:30
-    expect(rowCells("fixer")).toEqual(["▶fixer", "1:30", "1.2k", "3"]);
+    // A live row has no stored cost yet: a dash, never $0.00.
+    expect(rowCells("fixer")).toEqual(["▶fixer", "1:30", "1.2k", "—", "3"]);
 
     vi.advanceTimersByTime(1000);
     rerender(<div />); // flush the interval-driven state update
@@ -200,8 +203,8 @@ describe("IssueProgressHoverContent", () => {
 
     // The turn column is a bare count: the cap counts different things and
     // never belonged in a ratio with it.
-    expect(rowCells("review")[3]).toBe("21");
-    expect(rowCells("fixer")[3]).toBe("7");
+    expect(rowCells("review")[4]).toBe("21");
+    expect(rowCells("fixer")[4]).toBe("7");
     // The signal the ratio used to hint at, now stated by the run itself.
     expect(rowCells("review")[0]).toContain("max turns");
   });
@@ -218,6 +221,7 @@ describe("IssueProgressHoverContent", () => {
           completed_at: "2026-08-22T10:02:00Z",
           tokens: tokens(100, 50, 25, 900),
           turns: 4,
+          cost_usd: 0.004,
           max_turns: 0,
           is_live: false,
         },
@@ -232,6 +236,11 @@ describe("IssueProgressHoverContent", () => {
     // 2 minutes of completed elapsed
     expect(screen.getAllByText("2:00").length).toBeGreaterThan(0);
     expect(screen.getAllByText("175").length).toBeGreaterThan(0);
+    // A sub-cent GLM step shows as "<$0.01" in the row AND the footer —
+    // rounding it to "$0.00" would erase the one number this column is for.
+    expect(screen.getAllByText("<$0.01").length).toBe(2);
+    const footer = Array.from(document.querySelectorAll("tfoot td")).map((td) => td.textContent);
+    expect(footer).toEqual(["Completed", "2:00", "175", "<$0.01", "4"]);
   });
 
   it("omits pending rows and the step counter when expected_steps is null", () => {
@@ -399,7 +408,7 @@ describe("IssueProgressHoverContent — no runs", () => {
     // A card with no ACTIVE task still gets its history — that is the whole
     // reason the trigger is unconditional.
     expect(document.querySelector("table")).toBeTruthy();
-    expect(rowCells("review")).toEqual(["✓review", "2:00", "175", "4"]);
+    expect(rowCells("review")).toEqual(["✓review", "2:00", "175", "—", "4"]);
     expect(screen.queryByText("No agent runs yet")).toBeNull();
   });
 });

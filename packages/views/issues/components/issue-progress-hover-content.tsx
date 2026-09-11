@@ -7,6 +7,7 @@ import { cn } from "@multica/ui/lib/utils";
 import {
   completedTotals,
   formatTokens,
+  formatCost,
   formatTurns,
   groupProgressRows,
   shortFailureReason,
@@ -147,6 +148,7 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
             <th className="w-[26%] text-left font-normal">{t(($) => $.progress.step)}</th>
             <th className="text-right font-normal">{t(($) => $.progress.elapsed)}</th>
             <th className="text-right font-normal">{t(($) => $.progress.tokens)}</th>
+            <th className="text-right font-normal">{t(($) => $.progress.cost)}</th>
             <th className="text-right font-normal">{t(($) => $.progress.turns)}</th>
           </tr>
         </thead>
@@ -181,6 +183,7 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
               </td>
               <td className="text-right">{formatElapsed(liveElapsed(row))}</td>
               <td className="text-right">{formatTokens(row.tokens)}</td>
+              <td className="text-right">{formatCost(row.costUsd)}</td>
               <td className="text-right">{formatTurns(row.turns, row.maxTurns)}</td>
             </tr>
           ))}
@@ -204,6 +207,7 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
             <td className="text-left">{t(($) => $.progress.completed_footer)}</td>
             <td className="text-right">{formatElapsed(totals.elapsedMs)}</td>
             <td className="text-right">{formatTokens(totals.tokens)}</td>
+            <td className="text-right">{formatCost(totals.costUsd)}</td>
             <td className="text-right">{totals.turns}</td>
           </tr>
         </tfoot>

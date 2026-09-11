@@ -8,6 +8,7 @@ import {
   shortFailureReason,
   groupProgressRows,
   shortStepName,
+  formatCost,
 } from "./progress";
 
 function task(overrides: Partial<IssueProgressTask> = {}): IssueProgressTask {
@@ -20,6 +21,7 @@ function task(overrides: Partial<IssueProgressTask> = {}): IssueProgressTask {
     completed_at: "2026-08-22T10:01:00Z",
     tokens: { input: 100, output: 50, cache_creation: 25, cache_read: 9_000_000 },
     turns: 3,
+    cost_usd: 0.1,
     max_turns: 0,
     is_live: false,
     ...overrides,
@@ -189,6 +191,67 @@ describe("completedTotals", () => {
     expect(totals.tokens).toBe(175);
     expect(totals.turns).toBe(3);
     expect(totals.elapsedMs).toBe(60_000);
+  });
+});
+
+describe("cost", () => {
+  it("sums a group's cost and leaves an unpriced group null, not $0", () => {
+    const rows = groupProgressRows([
+      task({ agent_name: "fixer", cost_usd: 0.1 }),
+      task({ agent_name: "fixer", cost_usd: 0.05 }),
+      task({ agent_name: "readiness-agent", cost_usd: null }),
+    ]);
+    expect(rows[0]!.costUsd).toBeCloseTo(0.15, 9);
+    expect(rows[1]!.costUsd).toBeNull();
+  });
+
+  it("a group with one priced and one unpriced member sums the priced one", () => {
+    const rows = groupProgressRows([
+      task({ agent_name: "fixer", cost_usd: null }),
+      task({ agent_name: "fixer", cost_usd: 0.05 }),
+    ]);
+    expect(rows[0]!.costUsd).toBeCloseTo(0.05, 9);
+  });
+
+  // I6: completed steps only, and null contributes nothing — never zero.
+  it("totals completed steps only and skips null", () => {
+    const rows = groupProgressRows([
+      task({ agent_name: "review-agent", cost_usd: 0.2 }),
+      task({ agent_name: "readiness-agent", cost_usd: null }),
+      task({
+        agent_name: "fixer",
+        status: "running",
+        is_live: true,
+        completed_at: null,
+        cost_usd: 1.0,
+      }),
+    ]);
+    expect(completedTotals(rows).costUsd).toBeCloseTo(0.2, 9);
+  });
+
+  it("totals null when no completed step is priced", () => {
+    const rows = groupProgressRows([
+      task({ agent_name: "review-agent", cost_usd: null }),
+      task({ agent_name: "fixer", cost_usd: null }),
+    ]);
+    expect(completedTotals(rows).costUsd).toBeNull();
+  });
+});
+
+describe("formatCost", () => {
+  it("renders a dash for unknown, never $0.00", () => {
+    expect(formatCost(null)).toBe("—");
+  });
+  it("renders two decimals", () => {
+    expect(formatCost(0.157)).toBe("$0.16");
+    expect(formatCost(3.35)).toBe("$3.35");
+    expect(formatCost(0.005)).toBe("$0.01");
+  });
+  it("renders sub-cent as <$0.01 rather than rounding to nothing", () => {
+    expect(formatCost(0.004)).toBe("<$0.01");
+  });
+  it("renders a genuine zero as $0.00", () => {
+    expect(formatCost(0)).toBe("$0.00");
   });
 });
 

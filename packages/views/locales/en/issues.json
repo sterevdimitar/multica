@@ -555,6 +555,7 @@
     "step": "Step",
     "elapsed": "Elapsed",
     "tokens": "Tokens",
+    "cost": "Cost",
     "turns": "Turns",
     "queued": "Queued",
     "empty": "No agent runs yet",
