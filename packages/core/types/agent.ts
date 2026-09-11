@@ -791,6 +791,8 @@ export interface DashboardUsageDaily {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  /** Stored cost rolled up from task_usage; null when no row carried one. */
+  total_cost_usd: number | null;
   task_count: number;
 }
 
@@ -805,6 +807,8 @@ export interface DashboardUsageByAgent {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+  /** Stored cost rolled up from task_usage; null when no row carried one. */
+  total_cost_usd: number | null;
   task_count: number;
 }
 

@@ -634,6 +634,10 @@ const DashboardUsageDailySchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  // Stored cost rolled up from task_usage; null when no row in the bucket
+  // carried one. Defaulted so a backend older than this field still parses
+  // (the board must not blank out on backend/web skew, lessons 2026-05-19).
+  total_cost_usd: z.number().nullable().default(null),
   task_count: z.number().default(0),
 }).loose();
 
@@ -647,6 +651,10 @@ const DashboardUsageByAgentSchema = z.object({
   output_tokens: z.number().default(0),
   cache_read_tokens: z.number().default(0),
   cache_write_tokens: z.number().default(0),
+  // Stored cost rolled up from task_usage; null when no row in the bucket
+  // carried one. Defaulted so a backend older than this field still parses
+  // (the board must not blank out on backend/web skew, lessons 2026-05-19).
+  total_cost_usd: z.number().nullable().default(null),
   task_count: z.number().default(0),
 }).loose();
 
@@ -824,6 +832,10 @@ export const IssueProgressTaskSchema = z.object({
     cache_read: 0,
   }),
   turns: z.number().default(0),
+  // The step's stored cost (the streamer prices each run by its engine's
+  // rate table); null when no usage row carried one — rendered as a dash,
+  // never as $0. Defaulted for backend/web skew, as above.
+  cost_usd: z.number().nullable().default(null),
   // The agent's --max-turns budget, or 0 for "no cap declared". NO LONGER
   // RENDERED as a denominator: it counts tool-use turns only, while `turns`
   // counts more than that, so "21/20" was comparing two different quantities
