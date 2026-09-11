@@ -63,7 +63,10 @@ type DashboardUsageDailyResponse struct {
 	OutputTokens     int64  `json:"output_tokens"`
 	CacheReadTokens  int64  `json:"cache_read_tokens"`
 	CacheWriteTokens int64  `json:"cache_write_tokens"`
-	TaskCount        int32  `json:"task_count"`
+	// TotalCostUSD is the stored cost rolled up from task_usage (207). nil
+	// when no row in the bucket carried a cost; never 0 for that.
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	TaskCount    int32    `json:"task_count"`
 }
 
 // GetDashboardUsageDaily returns per-(date, model) token rows for the
@@ -115,6 +118,7 @@ func (h *Handler) listDashboardUsageDaily(
 			OutputTokens:     row.OutputTokens,
 			CacheReadTokens:  row.CacheReadTokens,
 			CacheWriteTokens: row.CacheWriteTokens,
+			TotalCostUSD:     costPtr(row.TotalCostUsd),
 			TaskCount:        row.TaskCount,
 		}
 	}
@@ -132,7 +136,10 @@ type DashboardUsageByAgentResponse struct {
 	OutputTokens     int64  `json:"output_tokens"`
 	CacheReadTokens  int64  `json:"cache_read_tokens"`
 	CacheWriteTokens int64  `json:"cache_write_tokens"`
-	TaskCount        int32  `json:"task_count"`
+	// TotalCostUSD is the stored cost rolled up from task_usage (207). nil
+	// when no row in the bucket carried a cost; never 0 for that.
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	TaskCount    int32    `json:"task_count"`
 }
 
 // GetDashboardUsageByAgent returns per-(agent, model) token aggregates
@@ -184,6 +191,7 @@ func (h *Handler) listDashboardUsageByAgent(
 			OutputTokens:     row.OutputTokens,
 			CacheReadTokens:  row.CacheReadTokens,
 			CacheWriteTokens: row.CacheWriteTokens,
+			TotalCostUSD:     costPtr(row.TotalCostUsd),
 			TaskCount:        row.TaskCount,
 		}
 	}

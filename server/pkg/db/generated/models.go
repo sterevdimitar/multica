@@ -951,6 +951,7 @@ type TaskUsageHourly struct {
 	TaskCount        int64              `json:"task_count"`
 	EventCount       int64              `json:"event_count"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	TotalCostUsd     pgtype.Float8      `json:"total_cost_usd"`
 }
 
 type TaskUsageHourlyDirty struct {

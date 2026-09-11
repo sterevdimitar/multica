@@ -52,6 +52,11 @@ type IssueProgressTask struct {
 	CompletedAt *time.Time          `json:"completed_at"`
 	Tokens      IssueProgressTokens `json:"tokens"`
 	Turns       int64               `json:"turns"`
+	// CostUSD is the STORED cost of the step — the streamer prices each run
+	// from the engine's rate table — summed over the step's task_usage rows.
+	// nil (null on the wire) when no row carried a cost; never 0 for that,
+	// because $0 reads as "free" and this field exists to stop wrong numbers.
+	CostUSD *float64 `json:"cost_usd"`
 	// MaxTurns is the agent's --max-turns budget, or 0 when it declares
 	// none. The UI renders "21/20" so a run that died at its cap explains
 	// itself; 0 means "unknown", and it renders the bare count instead of
@@ -102,24 +107,7 @@ func (h *Handler) GetIssueProgress(w http.ResponseWriter, r *http.Request) {
 
 	tasks := make([]IssueProgressTask, 0, len(rows))
 	for _, row := range rows {
-		tasks = append(tasks, IssueProgressTask{
-			TaskID:      uuidToString(row.TaskID),
-			AgentName:   row.AgentName,
-			Status:      row.Status,
-			QueuedAt:    row.CreatedAt.Time,
-			StartedAt:   timestampPtr(row.StartedAt),
-			CompletedAt: timestampPtr(row.CompletedAt),
-			Tokens: IssueProgressTokens{
-				Input:         row.InputTokens,
-				Output:        row.OutputTokens,
-				CacheCreation: row.CacheWriteTokens,
-				CacheRead:     row.CacheReadTokens,
-			},
-			Turns:         row.NumTurns,
-			MaxTurns:      maxTurnsFromCustomArgs(row.AgentCustomArgs),
-			IsLive:        liveTaskStatuses[row.Status],
-			FailureReason: row.FailureReason.String,
-		})
+		tasks = append(tasks, progressTaskFromRow(row))
 	}
 
 	writeJSON(w, http.StatusOK, IssueProgressResponse{
@@ -166,6 +154,42 @@ func maxTurnsFromCustomArgs(raw []byte) int64 {
 
 // timestampPtr turns a nullable timestamptz into a *time.Time so an unstarted
 // or unfinished step serializes as JSON null rather than the zero instant.
+// progressTaskFromRow is the projection of one ListTaskProgressByIssue row
+// into the wire shape. Pure, so the mapping can be tested without a
+// database — the sentinel handling in particular.
+func progressTaskFromRow(row db.ListTaskProgressByIssueRow) IssueProgressTask {
+	return IssueProgressTask{
+		TaskID:      uuidToString(row.TaskID),
+		AgentName:   row.AgentName,
+		Status:      row.Status,
+		QueuedAt:    row.CreatedAt.Time,
+		StartedAt:   timestampPtr(row.StartedAt),
+		CompletedAt: timestampPtr(row.CompletedAt),
+		Tokens: IssueProgressTokens{
+			Input:         row.InputTokens,
+			Output:        row.OutputTokens,
+			CacheCreation: row.CacheWriteTokens,
+			CacheRead:     row.CacheReadTokens,
+		},
+		Turns:         row.NumTurns,
+		CostUSD:       costPtr(row.TotalCostUsd),
+		MaxTurns:      maxTurnsFromCustomArgs(row.AgentCustomArgs),
+		IsLive:        liveTaskStatuses[row.Status],
+		FailureReason: row.FailureReason.String,
+	}
+}
+
+// costPtr maps the SQL cost sentinel to the wire. The queries return
+// COALESCE(SUM(total_cost_usd), -1) because sqlc infers every cast as NOT
+// NULL and a genuine NULL would fail to scan; -1 is unambiguous because a
+// cost cannot be negative. Anything else — including a real 0 — is a number.
+func costPtr(v float64) *float64 {
+	if v < 0 {
+		return nil
+	}
+	return &v
+}
+
 func timestampPtr(ts pgtype.Timestamptz) *time.Time {
 	if !ts.Valid {
 		return nil

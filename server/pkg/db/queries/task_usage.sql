@@ -64,6 +64,9 @@ SELECT
     SUM(output_tokens)::bigint       AS output_tokens,
     SUM(cache_read_tokens)::bigint   AS cache_read_tokens,
     SUM(cache_write_tokens)::bigint  AS cache_write_tokens,
+    -- -1 = no priced rows in the bucket; the handler maps it to null. See
+    -- ListTaskProgressByIssue for why a sentinel and not a NULL.
+    COALESCE(SUM(total_cost_usd), -1)::double precision AS total_cost_usd,
     SUM(task_count)::int             AS task_count
 FROM task_usage_hourly
 WHERE workspace_id = $1
@@ -95,6 +98,9 @@ SELECT
     SUM(output_tokens)::bigint       AS output_tokens,
     SUM(cache_read_tokens)::bigint   AS cache_read_tokens,
     SUM(cache_write_tokens)::bigint  AS cache_write_tokens,
+    -- -1 = no priced rows in the bucket; the handler maps it to null. See
+    -- ListTaskProgressByIssue for why a sentinel and not a NULL.
+    COALESCE(SUM(total_cost_usd), -1)::double precision AS total_cost_usd,
     SUM(task_count)::int             AS task_count
 FROM task_usage_hourly
 WHERE workspace_id = $1
@@ -190,6 +196,13 @@ SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
        COALESCE(SUM(tu.output_tokens), 0)::bigint      AS output_tokens,
        COALESCE(SUM(tu.cache_read_tokens), 0)::bigint  AS cache_read_tokens,
        COALESCE(SUM(tu.cache_write_tokens), 0)::bigint AS cache_write_tokens,
+       -- -1 means "no priced usage", and the handler maps it to null so the
+       -- popover renders a dash. NOT 0: $0 would read as "free", which is
+       -- exactly the kind of wrong number this column exists to replace. A
+       -- sentinel rather than a real NULL because sqlc infers every cast as
+       -- NOT NULL (float64), and a NULL would then fail to scan and 500 the
+       -- whole projection for any issue with one unpriced step.
+       COALESCE(SUM(tu.total_cost_usd), -1)::double precision AS total_cost_usd,
        COALESCE(MAX(tu.num_turns), 0)::bigint          AS num_turns
 FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
