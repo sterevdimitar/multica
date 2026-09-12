@@ -34,6 +34,10 @@ const PENDING_MARK = "○";
  */
 const STATUS_MARK: Record<ProgressRow["status"], string> = {
   live: "▶",
+  // Waiting for its turn (queued behind another run, or dispatched but not
+  // yet running). The card face already says "Queued" for this; drawing ▶
+  // here made the two surfaces disagree.
+  queued: "⏸",
   completed: "✓",
   failed: "✗",
   cancelled: "⊘",
@@ -111,7 +115,7 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
 
   const stepCounter = useMemo(() => {
     if (!expectedSteps || expectedSteps.length === 0) return null;
-    const finished = rows.filter((r) => r.status !== "live").length;
+    const finished = rows.filter((r) => r.status !== "live" && r.status !== "queued").length;
     return { n: Math.min(finished + 1, expectedSteps.length), m: expectedSteps.length };
   }, [expectedSteps, rows]);
 
@@ -159,6 +163,7 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
               key={row.taskIds.join(",")}
               className={cn(
                 row.status === "live" && "font-medium text-foreground",
+                row.status === "queued" && "text-muted-foreground",
                 row.status === "failed" && "text-destructive",
               )}
             >

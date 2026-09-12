@@ -88,6 +88,71 @@ describe("groupProgressRows", () => {
     expect(rows[0]!.liveStartedAt).toBeNull();
   });
 
+  // A task that is queued behind another run is not being worked on. The
+  // card face already says "Queued" for it; the popover must not say ▶.
+  it("marks a queued-only group as queued with no timer anchor", () => {
+    const rows = groupProgressRows([
+      task({ agent_name: "review-agent" }),
+      task({
+        agent_name: "readiness-agent",
+        status: "queued",
+        is_live: true,
+        started_at: null,
+        completed_at: null,
+        queued_at: "2026-08-22T10:10:00Z",
+      }),
+    ]);
+    const queued = rows[1]!;
+    expect(queued.status).toBe("queued");
+    expect(queued.liveStartedAt).toBeNull();
+    expect(queued.elapsedMs).toBeNull();
+  });
+
+  // The runner has been dispatched but claude is not running yet: still
+  // waiting, same predicate as the badge in surface/activity.ts.
+  it("treats dispatched as queued, not live", () => {
+    const rows = groupProgressRows([
+      task({ agent_name: "fixer", status: "dispatched", is_live: true, started_at: null, completed_at: null }),
+    ]);
+    expect(rows[0]!.status).toBe("queued");
+  });
+
+  it("lets a running member win over a queued one in the same group", () => {
+    const rows = groupProgressRows([
+      task({
+        task_id: "q",
+        agent_name: "fixer",
+        status: "queued",
+        is_live: true,
+        started_at: null,
+        completed_at: null,
+        queued_at: "2026-08-22T10:09:00Z",
+      }),
+      task({
+        task_id: "r",
+        agent_name: "fixer",
+        status: "running",
+        is_live: true,
+        started_at: "2026-08-22T10:10:00Z",
+        completed_at: null,
+        queued_at: "2026-08-22T10:08:00Z",
+      }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("live");
+    expect(rows[0]!.liveStartedAt).toBe("2026-08-22T10:10:00Z");
+  });
+
+  it("excludes a queued row from the completed totals", () => {
+    const rows = groupProgressRows([
+      task({ agent_name: "review-agent" }),
+      task({ agent_name: "readiness-agent", status: "queued", is_live: true, started_at: null, completed_at: null, tokens: { input: 1, output: 1, cache_creation: 0, cache_read: 0 }, turns: 1 }),
+    ]);
+    const totals = completedTotals(rows);
+    expect(totals.tokens).toBe(175);
+    expect(totals.turns).toBe(3);
+  });
+
   it("renders a failed run with its partial tokens", () => {
     const rows = groupProgressRows([
       task({ agent_name: "review-agent" }),

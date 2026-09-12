@@ -15,11 +15,18 @@ export interface ProgressRow {
   /** Run-length of the group; render "×N" when > 1. */
   count: number;
   /**
-   * "live" if any member is still running, "failed" if any member failed and
-   * none is live, "cancelled" if every member was cancelled, else
-   * "completed".
+   * "live" if any member is actually running, "queued" if a member is open
+   * but not yet running (queued or dispatched) and none is live, "failed" if
+   * any member failed and none is open, "cancelled" if every member was
+   * cancelled, else "completed".
+   *
+   * live vs queued uses the SAME predicate as the card-face badge in
+   * surface/activity.ts — `status === "running"` is the only working state.
+   * `is_live` alone cannot pick a glyph: it is true for a task waiting
+   * behind another run, and drawing ▶ for that contradicts the "Queued" the
+   * badge already shows on the same card.
    */
-  status: "completed" | "live" | "failed" | "cancelled";
+  status: "completed" | "live" | "queued" | "failed" | "cancelled";
   /**
    * displayTokens summed over members that reported a non-zero figure; null
    * when no member did. Mirrors costUsd on this same struct: 0 is never a
@@ -184,16 +191,22 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
     }
 
     if (t.is_live) {
-      row.status = "live";
-      // The most recent live member owns the timer anchor.
-      row.liveStartedAt = t.started_at ?? null;
-      continue; // a live member has no finished span to add
+      if (t.status === "running") {
+        row.status = "live";
+        // The most recent live member owns the timer anchor.
+        row.liveStartedAt = t.started_at ?? null;
+      } else if (row.status !== "live") {
+        // Queued or dispatched: waiting, not working. A running member
+        // already in the group keeps the row live and its timer anchor.
+        row.status = "queued";
+      }
+      continue; // an open member has no finished span to add
     }
 
     const span = spanMs(t.started_at, t.completed_at);
     if (span !== null) row.elapsedMs = (row.elapsedMs ?? 0) + span;
 
-    if (row.status !== "live") {
+    if (row.status !== "live" && row.status !== "queued") {
       if (FAILED_STATUSES.has(t.status)) {
         row.status = "failed";
         // Read defensively rather than trusting the declared type: this is
@@ -217,11 +230,12 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
 }
 
 /**
- * Cumulative footer: every FINISHED run, live excluded.
+ * Cumulative footer: every FINISHED run, live and queued excluded.
  *
  * Excluding the live row is deliberate — a total that grows while you watch
  * it cannot be compared against the previous run, which is the only thing
- * the number is for.
+ * the number is for. A queued row has done nothing yet, so it is excluded
+ * for the same reason.
  */
 export function completedTotals(rows: ProgressRow[]): {
   elapsedMs: number;
@@ -237,7 +251,7 @@ export function completedTotals(rows: ProgressRow[]): {
   let turns = 0;
   let costUsd: number | null = null;
   for (const r of rows) {
-    if (r.status === "live") continue;
+    if (r.status === "live" || r.status === "queued") continue;
     elapsedMs += r.elapsedMs ?? 0;
     // An unmeasured row contributes nothing and does not turn the total into
     // a number on its own — same as costUsd immediately below.

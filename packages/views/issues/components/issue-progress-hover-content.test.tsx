@@ -250,6 +250,59 @@ describe("IssueProgressHoverContent", () => {
     expect(rowCells("review")[0]).toContain("max turns");
   });
 
+  // The card face says "Queued" for this state; the popover used to say ▶.
+  // A queued step is waiting for its turn, and is not finished either — so
+  // it draws ⏸, stays un-bold, and does not advance "step N of M".
+  it("renders a queued row as ⏸ and does not count it as finished", () => {
+    mockState.progress = {
+      tasks: [
+        {
+          task_id: "t1",
+          agent_name: "review-agent",
+          status: "completed",
+          queued_at: "2026-08-22T10:00:00Z",
+          started_at: "2026-08-22T10:00:00Z",
+          completed_at: "2026-08-22T10:06:26Z",
+          tokens: tokens(200_000, 40_000, 6_700, 900_000),
+          turns: 23,
+          cost_usd: 0.06,
+          max_turns: 0,
+          failure_reason: "",
+          is_live: false,
+        },
+        {
+          task_id: "t2",
+          agent_name: "readiness-agent",
+          status: "queued",
+          queued_at: "2026-08-22T10:06:30Z",
+          started_at: null,
+          completed_at: null,
+          tokens: tokens(),
+          turns: 0,
+          cost_usd: null,
+          max_turns: 0,
+          failure_reason: "",
+          is_live: true,
+        },
+      ],
+      expected_steps: ["review-agent", "readiness-agent"],
+      server_now: "2026-08-22T10:11:30Z",
+    };
+
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+
+    expect(rowCells("readiness")).toEqual(["⏸readiness", "—", "—", "—", "0"]);
+    const readinessRow = screen
+      .getAllByRole("cell")
+      .find((c) => c.textContent?.includes("readiness"))!
+      .closest("tr")!;
+    expect(readinessRow.className).not.toContain("font-medium");
+    expect(readinessRow.className).toContain("text-muted-foreground");
+    expect(screen.getByText("Step 2 of 2")).toBeTruthy();
+    const footer = Array.from(document.querySelectorAll("tfoot td")).map((td) => td.textContent);
+    expect(footer).toEqual(["Completed", "6:26", "246.7k", "$0.06", "23"]);
+  });
+
   it("renders history with no live row and a Completed footer when nothing runs", () => {
     mockState.progress = {
       tasks: [
