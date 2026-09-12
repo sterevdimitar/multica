@@ -79,6 +79,22 @@ describe("ActiveTaskRow", () => {
     expect(mockState.taskMessagesOptions).not.toHaveBeenCalled();
   });
 
+  // On the Deep Infra / GLM route a live task's per-block usage is all-zero
+  // while turns still move: metrics.tokens is null in that case (see
+  // use-task-metrics.ts), and it must render as a dash, not "0", while the
+  // turn count still shows.
+  it("renders a running row's null tokens as a dash while turns move", () => {
+    renderWithI18n(
+      <ActiveTaskRow
+        task={makeTask()}
+        issueId="issue-1"
+        metrics={{ tokens: null, turns: 12 }}
+      />,
+    );
+
+    expect(screen.getByText(/·\s*—\s*·\s*12/)).toBeInTheDocument();
+  });
+
   it("does not make transcript actions depend on hover-only rendering", () => {
     renderWithI18n(<ActiveTaskRow task={makeTask()} issueId="issue-1" />);
 

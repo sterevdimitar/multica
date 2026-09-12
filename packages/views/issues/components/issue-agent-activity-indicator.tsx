@@ -17,7 +17,7 @@ import { cn } from "@multica/ui/lib/utils";
 import type { AvatarSize } from "@multica/ui/lib/avatar-size";
 import { AgentAvatarStack } from "../../agents/components/agent-avatar-stack";
 import { selectIssueTasks, type IssueTaskGroups } from "../surface/activity";
-import { displayTokens, formatTokens, shortStepName } from "../surface/progress";
+import { formatTokens, knownTokens, shortStepName } from "../surface/progress";
 import { IssueProgressHoverContent, formatElapsed } from "./issue-progress-hover-content";
 import { useT } from "../../i18n";
 
@@ -137,11 +137,14 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
 
   // Tokens are shown only when the flushed usage belongs to the task that is
   // running right now — a stale count from the previous step would read as
-  // this step's progress.
-  const liveTokens =
+  // this step's progress. An all-zero figure (the GLM route's per-block
+  // usage before real counts land) is unmeasured, not free, so it must not
+  // reach the card face as "🪙 0" — knownTokens turns it into null first.
+  const liveTokenCount =
     runningTask && liveUsage?.task_id === runningTask.id
-      ? formatTokens(displayTokens(liveUsage.tokens))
+      ? knownTokens(liveUsage.tokens)
       : null;
+  const liveTokens = liveTokenCount === null ? null : formatTokens(liveTokenCount);
 
   const startedAt = runningTask?.started_at;
   const elapsed = startedAt

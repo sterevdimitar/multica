@@ -5,6 +5,7 @@ import {
   displayTokens,
   formatTokens,
   formatTurns,
+  knownTokens,
   shortFailureReason,
   groupProgressRows,
   shortStepName,
@@ -274,6 +275,10 @@ describe("formatTokens", () => {
   ])("formats %i as %s", (input, expected) => {
     expect(formatTokens(input)).toBe(expected);
   });
+
+  it("renders a dash for null, never 0", () => {
+    expect(formatTokens(null)).toBe("—");
+  });
 });
 
 describe("shortStepName", () => {
@@ -285,6 +290,104 @@ describe("shortStepName", () => {
     ["custom-agent", "custom-agent"],
   ])("maps %s to %s", (input, expected) => {
     expect(shortStepName(input)).toBe(expected);
+  });
+});
+
+describe("knownTokens", () => {
+  it("returns displayTokens when non-zero", () => {
+    expect(knownTokens({ input: 100, output: 50, cache_creation: 25, cache_read: 9_000_000 })).toBe(175);
+  });
+
+  // 0 is never a measurement — every round trip bills input tokens — so an
+  // all-zero figure is the "unknown" signal, not "free". Mirrors
+  // use-task-metrics.ts's "any real work reports something".
+  it("returns null when the figure is all zero", () => {
+    expect(knownTokens({ input: 0, output: 0, cache_creation: 0, cache_read: 912_000 })).toBeNull();
+  });
+});
+
+describe("ProgressRow.tokens is null, not 0, for unmeasured usage", () => {
+  // On the GLM route Claude Code's per-block usage is all-zero while turns
+  // still move — a live step's tokens must read as unknown, not "free".
+  it("is null for a single live member with all-zero tokens and turns > 0", () => {
+    const rows = groupProgressRows([
+      task({
+        agent_name: "fixer",
+        status: "running",
+        is_live: true,
+        started_at: "2026-08-22T10:10:00Z",
+        completed_at: null,
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 5,
+      }),
+    ]);
+    expect(rows[0]!.tokens).toBeNull();
+    expect(rows[0]!.turns).toBe(5);
+  });
+
+  it("sums only the known member of a group with one all-zero and one measured", () => {
+    const rows = groupProgressRows([
+      task({
+        agent_name: "fixer",
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 5,
+      }),
+      task({
+        agent_name: "fixer",
+        tokens: { input: 100, output: 50, cache_creation: 25, cache_read: 0 },
+        turns: 3,
+      }),
+    ]);
+    expect(rows[0]!.tokens).toBe(175);
+  });
+
+  it("is null when every member of a group is all-zero", () => {
+    const rows = groupProgressRows([
+      task({
+        agent_name: "fixer",
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 5,
+      }),
+      task({
+        agent_name: "fixer",
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 2,
+      }),
+    ]);
+    expect(rows[0]!.tokens).toBeNull();
+  });
+});
+
+describe("completedTotals(rows).tokens is null, not 0, for unmeasured usage", () => {
+  it("sums the numeric row and skips the null one", () => {
+    const rows = groupProgressRows([
+      task({
+        agent_name: "review-agent",
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 4,
+      }),
+      task({
+        agent_name: "fixer",
+        tokens: { input: 100, output: 50, cache_creation: 25, cache_read: 0 },
+      }),
+    ]);
+    expect(completedTotals(rows).tokens).toBe(175);
+  });
+
+  it("is null when every completed row is null — three dashes must total a dash", () => {
+    const rows = groupProgressRows([
+      task({
+        agent_name: "review-agent",
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 4,
+      }),
+      task({
+        agent_name: "fixer",
+        tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+        turns: 2,
+      }),
+    ]);
+    expect(completedTotals(rows).tokens).toBeNull();
   });
 });
 

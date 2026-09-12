@@ -302,6 +302,52 @@ func TestReportTaskUsage_BroadcastsTaskUsage(t *testing.T) {
 	}
 }
 
+// On the Deep Infra / GLM route Claude Code's per-block usage carries an
+// all-zero usage block, so an incremental flush lands with every token
+// field 0 while num_turns is real. The broadcast used to be gated on
+// totalInput > 0 — an accident of where the prompt-cache-ratio log lived —
+// so that flush never reached the popover and the turn count only moved on
+// re-hover. It must broadcast like any other landed entry.
+func TestReportTaskUsage_BroadcastsZeroTokenTurns(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	issueID := seedProgressIssue(t, "zero-token turns broadcast issue")
+	taskID := createIssueBackedTask(t, issueID, "running")
+
+	var mu sync.Mutex
+	var got []events.Event
+	testHandler.Bus.Subscribe(protocol.EventTaskUsage, func(e events.Event) {
+		p, ok := e.Payload.(protocol.TaskUsageEventPayload)
+		if !ok || p.TaskID != taskID {
+			return // another test's task — this bus has no unsubscribe
+		}
+		mu.Lock()
+		got = append(got, e)
+		mu.Unlock()
+	})
+
+	body := `{"usage":[` +
+		`{"provider":"anthropic","model":"m1","input_tokens":0,"output_tokens":0,` +
+		`"cache_read_tokens":0,"cache_write_tokens":0,"num_turns":5}]}`
+	if w := postTaskUsage(t, taskID, body); w.Code != http.StatusOK {
+		t.Fatalf("usage POST: got %d: %s", w.Code, w.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 task:usage event, got %d", len(got))
+	}
+	p := got[0].Payload.(protocol.TaskUsageEventPayload)
+	if p.Turns != 5 {
+		t.Errorf("Turns = %d, want 5", p.Turns)
+	}
+	if p.Tokens.Input != 0 || p.Tokens.Output != 0 || p.Tokens.CacheCreation != 0 || p.Tokens.CacheRead != 0 {
+		t.Errorf("expected all-zero tokens, got %+v", p.Tokens)
+	}
+}
+
 // ----------------------------------------------------------------------
 // Task 8 — GET /api/issues/{id}/progress
 // ----------------------------------------------------------------------

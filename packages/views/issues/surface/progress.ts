@@ -20,8 +20,15 @@ export interface ProgressRow {
    * "completed".
    */
   status: "completed" | "live" | "failed" | "cancelled";
-  /** displayTokens summed over the group. */
-  tokens: number;
+  /**
+   * displayTokens summed over members that reported a non-zero figure; null
+   * when no member did. Mirrors costUsd on this same struct: 0 is never a
+   * measurement — every round trip bills input tokens (see
+   * use-task-metrics.ts's "any real work reports something") — so an
+   * all-zero member contributes nothing rather than a confident 0, and a
+   * group where every member is unmeasured renders a dash, not "0".
+   */
+  tokens: number | null;
   turns: number;
   /**
    * Stored cost summed over the group's priced members; null when no member
@@ -76,6 +83,26 @@ export function displayTokens(t: {
   return t.input + t.output + t.cache_creation;
 }
 
+/**
+ * displayTokens, or null when it is exactly 0.
+ *
+ * 0 is never a measurement: every round trip bills input tokens, so an
+ * all-zero figure means the usage never flushed, not that the step was
+ * free. On the Deep Infra / GLM route Claude Code's per-block usage really
+ * is all-zero mid-run — see use-task-metrics.ts. This is the one place that
+ * decision is made; the badge, the popover and the metrics map all call it
+ * so the three surfaces cannot disagree.
+ */
+export function knownTokens(t: {
+  input: number;
+  output: number;
+  cache_creation: number;
+  cache_read?: number;
+}): number | null {
+  const n = displayTokens(t);
+  return n === 0 ? null : n;
+}
+
 /** Milliseconds between two timestamps, or null if either is missing/unparseable. */
 function spanMs(
   startedAt: string | null | undefined,
@@ -119,7 +146,7 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
               agentName: t.agent_name,
               count: 0,
               status: "completed",
-              tokens: 0,
+              tokens: null,
               turns: 0,
               costUsd: null,
               maxTurns: 0,
@@ -134,7 +161,12 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
 
     row.count += 1;
     row.taskIds.push(t.task_id);
-    row.tokens += displayTokens(t.tokens);
+    // A member whose figure is all-zero is unmeasured, not free — it
+    // contributes nothing, same as an unpriced member's costUsd below.
+    const memberTokens = knownTokens(t.tokens);
+    if (memberTokens !== null) {
+      row.tokens = (row.tokens ?? 0) + memberTokens;
+    }
     row.turns += t.turns;
     // Wire data, read defensively like failure_reason below: an older
     // server omits the field and the schema defaults it to null.
@@ -193,19 +225,23 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
  */
 export function completedTotals(rows: ProgressRow[]): {
   elapsedMs: number;
-  tokens: number;
+  /** Sum of the measured completed rows; null when none reported tokens —
+   *  same rule as costUsd: three dashes must total a dash, not 0. */
+  tokens: number | null;
   turns: number;
   /** Sum of the priced completed rows; null when none is priced. */
   costUsd: number | null;
 } {
   let elapsedMs = 0;
-  let tokens = 0;
+  let tokens: number | null = null;
   let turns = 0;
   let costUsd: number | null = null;
   for (const r of rows) {
     if (r.status === "live") continue;
     elapsedMs += r.elapsedMs ?? 0;
-    tokens += r.tokens;
+    // An unmeasured row contributes nothing and does not turn the total into
+    // a number on its own — same as costUsd immediately below.
+    if (r.tokens !== null) tokens = (tokens ?? 0) + r.tokens;
     turns += r.turns;
     // An unpriced row contributes nothing and does not turn the total into
     // a number on its own — three dashes must total a dash, not $0.00.
@@ -259,8 +295,13 @@ export function shortFailureReason(reason: string): string {
   return reason.replace(/^claude-/, "").replace(/[-_]/g, " ");
 }
 
-/** Compact token count: exact below 1000, then one decimal with a unit. */
-export function formatTokens(n: number): string {
+/**
+ * Compact token count: exact below 1000, then one decimal with a unit.
+ * null is a dash, mirroring formatCost — see knownTokens for why 0 is never
+ * a measurement.
+ */
+export function formatTokens(n: number | null): string {
+  if (n === null) return "—";
   if (n < 1_000) return String(n);
   if (n < 1_000_000) return `${(n / 1_000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;

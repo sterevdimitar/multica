@@ -111,6 +111,36 @@ describe("IssueProgressHoverContent", () => {
     expect(screen.queryByText("1:30")).toBeNull();
   });
 
+  // On the Deep Infra / GLM route Claude Code's per-block usage is all-zero
+  // while turns still move (see progress.ts's knownTokens). The tokens cell
+  // must read as unknown, not "0", while the turns cell keeps moving.
+  it("renders a live GLM row's all-zero tokens as a dash while turns move", () => {
+    mockState.progress = {
+      tasks: [
+        {
+          task_id: "t1",
+          agent_name: "fixer",
+          status: "running",
+          queued_at: "2026-08-22T10:09:00Z",
+          started_at: "2026-08-22T10:10:00Z",
+          completed_at: null,
+          tokens: tokens(0, 0, 0, 0),
+          turns: 12,
+          cost_usd: null,
+          max_turns: 0,
+          failure_reason: "",
+          is_live: true,
+        },
+      ],
+      expected_steps: null,
+      server_now: "2026-08-22T10:11:30Z",
+    };
+
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+
+    expect(rowCells("fixer")).toEqual(["▶fixer", "1:30", "—", "—", "12"]);
+  });
+
   // A finished run is not automatically a successful one. Before this, every
   // non-live row drew "✓", so a review that died on max-turns was
   // indistinguishable from one that completed cleanly.

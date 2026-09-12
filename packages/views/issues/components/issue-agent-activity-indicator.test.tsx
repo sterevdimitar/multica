@@ -148,6 +148,23 @@ describe("IssueAgentActivityIndicator", () => {
     expect(container.textContent).toContain("🪙 38.2k");
   });
 
+  // On the Deep Infra / GLM route the per-block usage is all-zero while
+  // turns still move. The card face must never show "🪙 0" for that step.
+  it("shows no token glyph when the live-usage entry is all-zero", () => {
+    mockState.snapshot = [makeTask()];
+    mockState.liveUsage = {
+      task_id: "task-1",
+      tokens: { input: 0, output: 0, cache_creation: 0, cache_read: 0 },
+      turns: 5,
+    };
+
+    const { container } = renderWithI18n(
+      <IssueAgentActivityIndicator issueId="issue-1" />,
+    );
+
+    expect(container.textContent).not.toContain("🪙");
+  });
+
   it("ignores a live-usage entry belonging to a previous task", () => {
     mockState.snapshot = [makeTask()];
     mockState.liveUsage = {

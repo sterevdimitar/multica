@@ -3521,6 +3521,9 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 		// is cached input over total input-side tokens; a persistently low
 		// value flags a prompt prefix that is not being reused across runs
 		// (e.g. volatile values poisoning the cacheable prefix). MUL-3887.
+		// This log is gated on totalInput > 0 because a ratio over zero is
+		// meaningless — but that gate must not also decide whether the
+		// entry counts toward the broadcast below.
 		if totalInput := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens; totalInput > 0 {
 			slog.Info("task prompt-cache usage",
 				"task_id", taskID,
@@ -3532,15 +3535,23 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 				"cache_write_tokens", u.CacheWriteTokens,
 				"cache_read_ratio", float64(u.CacheReadTokens)/float64(totalInput),
 			)
-			// Sum for the broadcast. Only entries that actually landed
-			// contribute — a failed upsert `continue`s above.
-			broadcast.Tokens.Input += u.InputTokens
-			broadcast.Tokens.Output += u.OutputTokens
-			broadcast.Tokens.CacheCreation += u.CacheWriteTokens
-			broadcast.Tokens.CacheRead += u.CacheReadTokens
-			broadcast.Turns += u.NumTurns
-			broadcastAny = true
 		}
+
+		// Sum for the broadcast. Every entry whose upsert landed contributes,
+		// regardless of totalInput — a failed upsert `continue`s above before
+		// reaching here. On the Deep Infra / GLM route an incremental flush's
+		// usage block is all-zero while num_turns is real (Claude Code's
+		// per-block assistant events don't carry the real counts, only the
+		// final message_delta does), so gating this on totalInput > 0 — as
+		// upstream's log placement used to, incidentally — silently dropped
+		// every such flush and the popover's turn count only moved on
+		// re-hover.
+		broadcast.Tokens.Input += u.InputTokens
+		broadcast.Tokens.Output += u.OutputTokens
+		broadcast.Tokens.CacheCreation += u.CacheWriteTokens
+		broadcast.Tokens.CacheRead += u.CacheReadTokens
+		broadcast.Turns += u.NumTurns
+		broadcastAny = true
 	}
 
 	// One event per request, not per entry — a multi-model run should move
