@@ -140,11 +140,10 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
   // this step's progress. An all-zero figure (the GLM route's per-block
   // usage before real counts land) is unmeasured, not free, so it must not
   // reach the card face as "🪙 0" — knownTokens turns it into null first.
-  const liveTokenCount =
+  const liveTokens =
     runningTask && liveUsage?.task_id === runningTask.id
       ? knownTokens(liveUsage.tokens)
       : null;
-  const liveTokens = liveTokenCount === null ? null : formatTokens(liveTokenCount);
 
   const startedAt = runningTask?.started_at;
   const elapsed = startedAt
@@ -198,7 +197,7 @@ export const IssueAgentActivityIndicator = memo(function IssueAgentActivityIndic
             {[
               stepName,
               elapsed ? `⏱ ${elapsed}` : t(($) => $.progress.queued),
-              liveTokens ? `🪙 ${liveTokens}` : null,
+              liveTokens !== null ? `🪙 ${formatTokens(liveTokens)}` : null,
             ]
               .filter(Boolean)
               .join(" ")}

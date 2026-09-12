@@ -301,7 +301,7 @@ describe("knownTokens", () => {
   // 0 is never a measurement — every round trip bills input tokens — so an
   // all-zero figure is the "unknown" signal, not "free". Mirrors
   // use-task-metrics.ts's "any real work reports something".
-  it("returns null when the figure is all zero", () => {
+  it("returns null when input/output/cache_creation are all zero, whatever cache_read says", () => {
     expect(knownTokens({ input: 0, output: 0, cache_creation: 0, cache_read: 912_000 })).toBeNull();
   });
 });

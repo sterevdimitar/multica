@@ -3542,10 +3542,10 @@ func (h *Handler) ReportTaskUsage(w http.ResponseWriter, r *http.Request) {
 		// reaching here. On the Deep Infra / GLM route an incremental flush's
 		// usage block is all-zero while num_turns is real (Claude Code's
 		// per-block assistant events don't carry the real counts, only the
-		// final message_delta does), so gating this on totalInput > 0 — as
-		// upstream's log placement used to, incidentally — silently dropped
-		// every such flush and the popover's turn count only moved on
-		// re-hover.
+		// final message_delta does), so gating this on totalInput > 0 — the
+		// gate was an accident of where the prompt-cache-ratio log lived,
+		// not a design — silently dropped every such flush and the
+		// popover's turn count only moved on re-hover.
 		broadcast.Tokens.Input += u.InputTokens
 		broadcast.Tokens.Output += u.OutputTokens
 		broadcast.Tokens.CacheCreation += u.CacheWriteTokens
