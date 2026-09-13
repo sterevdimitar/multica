@@ -655,6 +655,17 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		}
 		// No EventIssueCreated / subscriber fan-out here: the card already
 		// exists and already went through that path once, at its own creation.
+
+		// A push restarts the chain. Every run on this card began on a head
+		// that no longer exists: cancel them (except a fixer mid-run — it is
+		// the one that pushed), hand the card back to the entry agent, and
+		// leave the trace. The enqueue below is then the one fresh review.
+		// A card with no assignee (parked) is left exactly as it was — see
+		// push_restart.go and the design it cites.
+		issue, err = s.restartChainOnPush(ctx, ap, *run, existing)
+		if err != nil {
+			return fmt.Errorf("restart chain on push: %w", err)
+		}
 	} else {
 		issueNumber, err := qtx.IncrementIssueCounter(ctx, ap.WorkspaceID)
 		if err != nil {
