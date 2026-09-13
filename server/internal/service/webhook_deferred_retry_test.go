@@ -125,3 +125,90 @@ func TestPromoteDueDeferredWebhookTasksPromotesAndReportsTheCount(t *testing.T) 
 		t.Fatalf("second pass promoted %d, want 0 — promotion is not idempotent", got)
 	}
 }
+
+// /fail with an output posts the run's summary as the agent's comment on
+// every attempt — retry pending or not. The summary is the fixer's work
+// product ("here is the fix; the push was rejected"); the generic error
+// system comment stays gated on "no retry pending" as before. Also proves
+// the push_rejected chain end to end: a webhook task failed with that
+// reason gets a deferred child firing ~5 minutes out.
+func TestFailTaskWithOutputPostsTheSummaryEvenWhenRetrying(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	queries := db.New(pool)
+	svc := NewTaskService(queries, pool, nil, events.New())
+
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool,
+		lifecycleFixtureOpts{prefix: "WDR", number: 720005, assign: true, webhook: true}, StatusInProgress)
+	issueID := util.UUIDToString(issue.ID)
+	taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, issueID, "running")
+
+	const summary = "## Summary\n\nfix committed as d6f7806; push rejected (403)"
+	if _, err := svc.FailTaskWithOutput(ctx, util.MustParseUUID(taskID),
+		"the fixer committed 1 commit(s) that never reached GitHub", "sess-1", "/work", "push_rejected", summary); err != nil {
+		t.Fatalf("FailTaskWithOutput: %v", err)
+	}
+
+	if got := countCommentsForIssue(t, ctx, pool, issueID, "push rejected (403)"); got != 1 {
+		t.Fatalf("summary comments = %d, want 1", got)
+	}
+	// Retry pending → the generic error system comment is still suppressed.
+	if got := countCommentsForIssue(t, ctx, pool, issueID, "never reached GitHub"); got != 0 {
+		t.Fatalf("error comments = %d, want 0 while a retry is pending", got)
+	}
+
+	var childStatus string
+	var childAttempt int32
+	var secondsOut float64
+	if err := pool.QueryRow(ctx, `
+		SELECT status, attempt, EXTRACT(EPOCH FROM (fire_at - now()))
+		FROM agent_task_queue WHERE retry_of_task_id = $1`, taskID).Scan(&childStatus, &childAttempt, &secondsOut); err != nil {
+		t.Fatalf("read retry child: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE retry_of_task_id = $1`, taskID)
+	})
+	if childStatus != "deferred" || childAttempt != 2 {
+		t.Fatalf("retry child = %s attempt %d, want deferred attempt 2", childStatus, childAttempt)
+	}
+	// fire_at is stamped from the server's clock and compared against the
+	// database's; a few seconds of skew is normal. The assertion is the
+	// TIER — 5 minutes, not 10 — so the window is wide.
+	if secondsOut < 270 || secondsOut > 330 {
+		t.Fatalf("retry child fires in %.0fs, want ~300s (the 5-minute tier)", secondsOut)
+	}
+	// The card is NOT parked while a retry is pending (spec invariant 2 of the
+	// dispatch-timeout design, unchanged here).
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issue.ID).Scan(&status); err != nil {
+		t.Fatalf("read issue: %v", err)
+	}
+	if status != StatusInProgress {
+		t.Fatalf("issue status = %q, want %q while a retry is pending", status, StatusInProgress)
+	}
+}
+
+func TestFailTaskWithoutOutputPostsNoSummary(t *testing.T) {
+	ctx := context.Background()
+	pool := newTaskClaimRacePool(t)
+	queries := db.New(pool)
+	svc := NewTaskService(queries, pool, nil, events.New())
+
+	issue, _, agentID, runtimeID := newLifecycleFixture(t, ctx, pool,
+		lifecycleFixtureOpts{prefix: "WDR", number: 720006, assign: true, webhook: true}, StatusInProgress)
+	issueID := util.UUIDToString(issue.ID)
+	taskID := createLifecycleTask(t, ctx, pool, agentID, runtimeID, issueID, "running")
+
+	before := countCommentsForIssue(t, ctx, pool, issueID, "")
+	if _, err := svc.FailTaskWithOutput(ctx, util.MustParseUUID(taskID), "boom", "", "", "push_rejected", ""); err != nil {
+		t.Fatalf("FailTaskWithOutput: %v", err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE retry_of_task_id = $1`, taskID)
+	})
+	// A retry is pending, so neither the (absent) summary nor the generic
+	// error comment is posted: no new comment at all.
+	if got := countCommentsForIssue(t, ctx, pool, issueID, ""); got != before {
+		t.Fatalf("comments = %d, want %d (no summary, error suppressed by the pending retry)", got, before)
+	}
+}

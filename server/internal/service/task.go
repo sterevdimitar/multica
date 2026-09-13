@@ -2939,7 +2939,25 @@ func (s *TaskService) observeChatOutputLocalPath(task db.AgentTaskQueue, body st
 // coarse bucket. Daemon callers that already produced a refined reason
 // (via classifyPoisonedError, the timeout / runtime classifier, etc.)
 // will have their value preserved untouched.
+// FailTask is FailTaskWithOutput with no summary — the shape every daemon
+// and sweeper caller uses.
 func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason string) (*db.AgentTaskQueue, error) {
+	return s.FailTaskWithOutput(ctx, taskID, errMsg, sessionID, workDir, failureReason, "")
+}
+
+// FailTaskWithOutput fails a task and, when `output` is non-empty, posts it
+// as the agent's comment on the issue — the run's summary, through the same
+// redact-then-truncate path CompleteTask's fallback uses. It exists for
+// dev-command-center's step-finalizer, which fails a fixer run as
+// push_rejected when its commits never reached GitHub: the fixer did real
+// work and said so, and that summary must reach the card even though the
+// task is failed. Posted on EVERY attempt, retry pending or not — unlike the
+// generic errMsg system comment below, which stays gated on "no retry
+// pending" because it is boilerplate ("task timed out") that the next
+// attempt will restate. Going through here rather than
+// /api/issues/{id}/comments matters: that HTTP handler runs the @-mention
+// scan, and this is agent-authored text.
+func (s *TaskService) FailTaskWithOutput(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason, output string) (*db.AgentTaskQueue, error) {
 	// MUL-2946: synthesise a refined reason from the error text whenever the
 	// caller didn't supply one. This is the last write-path guard against
 	// "agent_error" coarse rows ending up in agent_task_queue.failure_reason
@@ -3105,6 +3123,15 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 				s.NotifyTaskEnqueued(ctx, *retried)
 			}
 		}
+	}
+
+	// The run's summary, when the caller supplied one (FailTaskWithOutput):
+	// the agent's own comment, on every attempt. See the method comment for
+	// why this is not gated on `retried`.
+	if output != "" && task.IssueID.Valid {
+		body := util.UnescapeBackslashEscapes(output)
+		content := truncateFallbackCommentBody(redact.Text(body), maxSynthesizedFallbackCommentRunes)
+		s.createAgentComment(ctx, task.IssueID, task.AgentID, content, "comment", task.TriggerCommentID, task.ID)
 	}
 
 	// Skip the per-failure system comment when we'll immediately retry —
