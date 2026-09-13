@@ -189,7 +189,7 @@ func TestProviderNetworkRetrySchedule(t *testing.T) {
 		{"timeout", 1, 1},                        // unrelated + disabled → untouched
 	}
 	for _, tc := range ceilingCases {
-		if got := retryAttemptCeiling(tc.reason, tc.max); got != tc.want {
+		if got := retryAttemptCeiling(tc.reason, tc.max, false); got != tc.want {
 			t.Errorf("ceiling(%q, %d) = %d, want %d", tc.reason, tc.max, got, tc.want)
 		}
 	}
@@ -206,7 +206,7 @@ func TestProviderNetworkRetrySchedule(t *testing.T) {
 		{"timeout", 2, 0}, // unrelated reason → never deferred
 	}
 	for _, tc := range delayCases {
-		if got := retryDelayForAttempt(tc.reason, tc.failedAttempt); got != tc.want {
+		if got := retryDelayForAttempt(tc.reason, tc.failedAttempt, false); got != tc.want {
 			t.Errorf("retryDelayForAttempt(%q, %d) = %s, want %s", tc.reason, tc.failedAttempt, got, tc.want)
 		}
 	}
@@ -236,7 +236,7 @@ func TestProviderNetworkRetrySchedule(t *testing.T) {
 		{"non-retryable reason never retries", "agent_error.unknown", 1, 2, false},
 	}
 	for _, tc := range eligCases {
-		if got := retryEligible(tc.reason, mkTask(tc.attempt, tc.max)); got != tc.want {
+		if got := retryEligible(tc.reason, mkTask(tc.attempt, tc.max), false); got != tc.want {
 			t.Errorf("%s: retryEligible(%q, attempt=%d/max=%d) = %v, want %v", tc.name, tc.reason, tc.attempt, tc.max, got, tc.want)
 		}
 	}
