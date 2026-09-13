@@ -1169,6 +1169,28 @@ WHERE runtime_id = ANY(@runtime_ids::uuid[])
   AND fire_at <= now()
 RETURNING *;
 
+-- name: PromoteDueDeferredWebhookTasks :many
+-- The webhook-runtime counterpart to the two promotions above, run from the
+-- server's sweeper tick rather than from a claim. Those run only inside the
+-- daemon's ClaimTask poll, and a webhook runtime never claims — it is a
+-- stateless HTTP receiver — so a deferred webhook row (a retry armed with a
+-- fire_at backoff: the 5/10-minute GitHub-unreachable schedule) had no clock
+-- at all and stayed `deferred` forever. This query is that clock. The
+-- runtime_mode join keeps daemon rows out: those are promoted at claim time
+-- with the daemon wakeup that must follow, and promoting them here would
+-- race the poll for the same row. The service dispatches each returned row
+-- to its webhook (PromoteDueDeferredWebhookTasks).
+UPDATE agent_task_queue
+SET status = 'queued'
+WHERE status = 'deferred'
+  AND fire_at <= now()
+  AND EXISTS (
+    SELECT 1 FROM agent_runtime wr
+    WHERE wr.id = agent_task_queue.runtime_id
+      AND wr.runtime_mode = 'webhook'
+  )
+RETURNING *;
+
 -- name: CancelDeferredEscalationsForTask :many
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL

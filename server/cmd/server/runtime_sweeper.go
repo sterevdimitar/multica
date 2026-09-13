@@ -138,6 +138,7 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepStaleTasks(ctx, queries, taskSvc, bus)
 			sweepStaleWebhookTasks(ctx, queries, taskSvc)
+			sweepDeferredWebhookTasks(ctx, queries, taskSvc)
 			sweepExpiredQueuedTasks(ctx, queries, taskSvc)
 			sweepDeferredChatFinalizations(ctx, queries, taskSvc)
 			gcRuntimes(ctx, queries, bus)
@@ -355,6 +356,23 @@ func sweepStaleWebhookTasks(ctx context.Context, queries *db.Queries, taskSvc *s
 
 	slog.Info("webhook task sweeper: failed stale webhook tasks", "count", len(failedTasks))
 	taskSvc.HandleFailedWebhookTasks(ctx, failedTasks)
+}
+
+// sweepDeferredWebhookTasks promotes and dispatches the deferred webhook
+// retries whose fire_at has arrived — the 5/10-minute GitHub-unreachable
+// schedule (dispatch_timeout, push_rejected, a webhook task's timeout). It
+// is the ONLY clock those rows have: upstream promotes deferred tasks
+// inside the daemon's claim poll, and a webhook runtime never claims.
+// Remove this arm and every deferred webhook retry is a `deferred` row
+// forever, silently.
+//
+// Ordered AFTER sweepStaleWebhookTasks on purpose: a row that tick just
+// failed and re-deferred must wait its full backoff, not be promoted by the
+// same pass that armed it.
+func sweepDeferredWebhookTasks(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService) {
+	if n := taskSvc.PromoteDueDeferredWebhookTasks(ctx); n > 0 {
+		slog.Info("webhook task sweeper: promoted due deferred retries", "count", n)
+	}
 }
 
 // sweepExpiredQueuedTasks fails tasks that have been sitting in 'queued' for
