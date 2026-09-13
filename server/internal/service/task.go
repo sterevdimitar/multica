@@ -3093,7 +3093,17 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 		)
 		if retried.Status == "queued" {
 			s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, *retried)
-			s.NotifyTaskEnqueued(ctx, *retried)
+			// The fifth enqueue site (see MaybeRetryFailedTask for the other
+			// four): /fail is the path dev-command-center's step-finalizer
+			// uses, and an immediate retry child created here had no
+			// dispatcher for a webhook runtime — NotifyTaskEnqueued is a
+			// daemon websocket wakeup — so it sat `queued` until
+			// queuedTTLSeconds. The GitHub-unreachable reasons are deferred
+			// and reach the sweeper instead, but every other retryable
+			// reason arriving over /fail is immediate and lands here.
+			if !s.MaybeDispatchToWebhook(ctx, *retried) {
+				s.NotifyTaskEnqueued(ctx, *retried)
+			}
 		}
 	}
 
