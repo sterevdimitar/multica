@@ -78,14 +78,14 @@ func pushExemptAgents() map[string]bool {
 
 // planPushRestart is the whole decision, pure so its table is its test.
 //
-// assigned=false is a parked or blocked card (no assignee): nothing is
-// cancelled and nothing restarts — what a push to a parked card should do is
-// a separate design. Otherwise every active task is cancelled except one that
-// is running or dispatched under an exempt name, and the restart is on.
-func planPushRestart(assigned bool, tasks []pushRestartTask, exempt map[string]bool) (cancel []pushRestartTask, restart bool) {
-	if !assigned {
-		return nil, false
-	}
+// Every active task is cancelled except one that is running or dispatched
+// under an exempt name — the run that made the push. The restart itself is
+// unconditional: a card with no assignee (parked at in_review, blocked after
+// a failed run) is not an exception, because a push to a parked pull request
+// is a fix attempt and the pipeline's job is to look at it (dev-command-center
+// docs/superpowers/specs/2026-09-13-push-to-parked-card-design.md §2). Whether
+// the card had an assignee is the executor's business — it writes one back.
+func planPushRestart(tasks []pushRestartTask, exempt map[string]bool) (cancel []pushRestartTask) {
 	for _, t := range tasks {
 		if !pushActiveStatuses[t.Status] {
 			continue
@@ -95,7 +95,7 @@ func planPushRestart(assigned bool, tasks []pushRestartTask, exempt map[string]b
 		}
 		cancel = append(cancel, t)
 	}
-	return cancel, true
+	return cancel
 }
 
 // pullRequestPush reads the pushed head and the pushing account from the
@@ -203,10 +203,7 @@ func (s *AutopilotService) restartChainOnPush(ctx context.Context, ap db.Autopil
 		}
 		tasks = append(tasks, pushRestartTask{ID: r.ID, AgentID: r.AgentID, AgentName: name, Status: r.Status})
 	}
-	cancel, restart := planPushRestart(true, tasks, pushExemptAgents())
-	if !restart {
-		return issue, nil
-	}
+	cancel := planPushRestart(tasks, pushExemptAgents())
 	headSHA, sender := pullRequestPush(run)
 	cancelled := make([]pushRestartTask, 0, len(cancel))
 	for _, t := range cancel {

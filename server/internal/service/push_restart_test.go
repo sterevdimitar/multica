@@ -57,56 +57,58 @@ func names(ts []pushRestartTask) []string {
 func TestPlanPushRestart(t *testing.T) {
 	fixerOnly := map[string]bool{"fixer": true}
 	cases := []struct {
-		name        string
-		assigned    bool
-		tasks       []pushRestartTask
-		exempt      map[string]bool
-		wantCancel  []string
-		wantRestart bool
+		name       string
+		tasks      []pushRestartTask
+		exempt     map[string]bool
+		wantCancel []string
 	}{
-		{"reviewer running", true,
+		{"reviewer running",
 			[]pushRestartTask{prTask("review-agent", "running")}, fixerOnly,
-			[]string{"review-agent:running"}, true},
-		{"validator running", true,
+			[]string{"review-agent:running"}},
+		{"validator running",
 			[]pushRestartTask{prTask("review-agent", "completed"), prTask("review-validator-agent", "running")}, fixerOnly,
-			[]string{"review-validator-agent:running"}, true},
-		{"fixer running (its own push)", true,
+			[]string{"review-validator-agent:running"}},
+		{"fixer running (its own push)",
 			[]pushRestartTask{prTask("fixer", "running")}, fixerOnly,
-			[]string{}, true},
-		{"fixer running + queued reviewer", true,
+			[]string{}},
+		{"fixer running + queued reviewer",
 			[]pushRestartTask{prTask("fixer", "running"), prTask("review-agent", "queued")}, fixerOnly,
-			[]string{"review-agent:queued"}, true},
-		{"fixer queued is not exempt", true,
+			[]string{"review-agent:queued"}},
+		{"fixer queued is not exempt",
 			[]pushRestartTask{prTask("fixer", "queued")}, fixerOnly,
-			[]string{"fixer:queued"}, true},
-		{"fixer dispatched is exempt", true,
+			[]string{"fixer:queued"}},
+		{"fixer dispatched is exempt",
 			[]pushRestartTask{prTask("fixer", "dispatched")}, fixerOnly,
-			[]string{}, true},
-		{"judge running", true,
+			[]string{}},
+		{"judge running",
 			[]pushRestartTask{prTask("readiness-agent", "running")}, fixerOnly,
-			[]string{"readiness-agent:running"}, true},
-		{"nothing active", true,
+			[]string{"readiness-agent:running"}},
+		{"nothing active",
 			[]pushRestartTask{prTask("review-agent", "completed"), prTask("fixer", "failed"), prTask("fixer", "cancelled")}, fixerOnly,
-			[]string{}, true},
-		{"no assignee: untouched", false,
+			[]string{}},
+		// A parked or blocked card is not a special case any more: the plan
+		// does not know or care whether the card has an assignee
+		// (push-to-parked-card design §3.1). The same tasks get the same
+		// answer; the executor writes the assignee back.
+		{"parked card with a stale reviewer: cancelled like any other",
 			[]pushRestartTask{prTask("review-agent", "running")}, fixerOnly,
-			[]string{}, false},
-		{"empty exempt set cancels a running fixer", true,
+			[]string{"review-agent:running"}},
+		{"parked card with the fixer running through the park (card 221): fixer kept",
+			[]pushRestartTask{prTask("fixer", "running")}, fixerOnly,
+			[]string{}},
+		{"empty exempt set cancels a running fixer",
 			[]pushRestartTask{prTask("fixer", "running")}, map[string]bool{},
-			[]string{"fixer:running"}, true},
-		{"waiting_local_directory counts as active", true,
+			[]string{"fixer:running"}},
+		{"waiting_local_directory counts as active",
 			[]pushRestartTask{prTask("review-agent", "waiting_local_directory")}, fixerOnly,
-			[]string{"review-agent:waiting_local_directory"}, true},
-		{"a deferred fixer retry is for the old head: cancelled", true,
+			[]string{"review-agent:waiting_local_directory"}},
+		{"a deferred fixer retry is for the old head: cancelled",
 			[]pushRestartTask{prTask("fixer", "deferred")}, fixerOnly,
-			[]string{"fixer:deferred"}, true},
+			[]string{"fixer:deferred"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cancel, restart := planPushRestart(tc.assigned, tc.tasks, tc.exempt)
-			if restart != tc.wantRestart {
-				t.Fatalf("restart = %v, want %v", restart, tc.wantRestart)
-			}
+			cancel := planPushRestart(tc.tasks, tc.exempt)
 			if got := names(cancel); !reflect.DeepEqual(got, tc.wantCancel) {
 				t.Fatalf("cancel = %v, want %v", got, tc.wantCancel)
 			}
