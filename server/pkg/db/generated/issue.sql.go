@@ -1546,6 +1546,72 @@ func (q *Queries) UpdateIssueStatus(ctx context.Context, arg UpdateIssueStatusPa
 	return i, err
 }
 
+const updateIssueStatusAndAssign = `-- name: UpdateIssueStatusAndAssign :one
+UPDATE issue SET
+    status = $2,
+    assignee_type = $3,
+    assignee_id = $4,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $5
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
+`
+
+type UpdateIssueStatusAndAssignParams struct {
+	ID           pgtype.UUID `json:"id"`
+	Status       string      `json:"status"`
+	AssigneeType pgtype.Text `json:"assignee_type"`
+	AssigneeID   pgtype.UUID `json:"assignee_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+}
+
+// The mirror of UpdateIssueStatusAndUnassign, for the one automated writer
+// allowed to take a card OUT of a park: the autopilot's push-restart path
+// (push_restart.go). A pull-request push is the human act it reacts to, so
+// it may write in_progress over in_review — which MarkIssueRunning refuses
+// on purpose — and it must set the assignee in the same statement: a card
+// left in_progress with no assignee wakes nobody on the next comment, and a
+// card left in_review with an assignee reads as a park to the board and as
+// no hold to the pipeline. Workspace_id in the WHERE is the tenant guard.
+func (q *Queries) UpdateIssueStatusAndAssign(ctx context.Context, arg UpdateIssueStatusAndAssignParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueStatusAndAssign,
+		arg.ID,
+		arg.Status,
+		arg.AssigneeType,
+		arg.AssigneeID,
+		arg.WorkspaceID,
+	)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+	)
+	return i, err
+}
+
 const updateIssueStatusAndUnassign = `-- name: UpdateIssueStatusAndUnassign :one
 UPDATE issue SET
     status = $2,

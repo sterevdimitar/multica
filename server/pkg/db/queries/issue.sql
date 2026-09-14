@@ -138,6 +138,23 @@ UPDATE issue SET
 WHERE id = $1 AND workspace_id = $3
 RETURNING *;
 
+-- name: UpdateIssueStatusAndAssign :one
+-- The mirror of UpdateIssueStatusAndUnassign, for the one automated writer
+-- allowed to take a card OUT of a park: the autopilot's push-restart path
+-- (push_restart.go). A pull-request push is the human act it reacts to, so
+-- it may write in_progress over in_review — which MarkIssueRunning refuses
+-- on purpose — and it must set the assignee in the same statement: a card
+-- left in_progress with no assignee wakes nobody on the next comment, and a
+-- card left in_review with an assignee reads as a park to the board and as
+-- no hold to the pipeline. Workspace_id in the WHERE is the tenant guard.
+UPDATE issue SET
+    status = $2,
+    assignee_type = $3,
+    assignee_id = $4,
+    updated_at = now()
+WHERE id = $1 AND workspace_id = $5
+RETURNING *;
+
 -- name: UpdateIssueAssignee :one
 -- Sets only the assignee pair. UpdateIssue clears every narg it is not given
 -- (start_date, due_date, parent_issue_id, project_id, stage), so it is the
