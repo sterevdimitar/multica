@@ -148,31 +148,53 @@ func TestPushRestartComment(t *testing.T) {
 	sha := "d5a9163c77f31dc7cc601b1553e19f4cb57c89c5"
 	two := []pushRestartTask{prTask("review-agent", "running"), prTask("fixer", "queued")}
 
-	got := pushRestartComment(sha, "sterevdimitar", two)
+	got := pushRestartComment(sha, "sterevdimitar", two, "in_progress", false)
 	want := "↻ Head moved to `d5a9163` (pushed by sterevdimitar). Cancelled: review-agent (running), fixer (queued). Review restarted from the top."
 	if got != want {
-		t.Fatalf("two cancelled:\n got %q\nwant %q", got, want)
+		t.Fatalf("assigned, two cancelled:\n got %q\nwant %q", got, want)
 	}
 
-	got = pushRestartComment(sha, "sterevdimitar", nil)
+	got = pushRestartComment(sha, "sterevdimitar", nil, "in_progress", false)
 	want = "↻ Head moved to `d5a9163` (pushed by sterevdimitar). Review restarted from the top."
 	if got != want {
-		t.Fatalf("none cancelled:\n got %q\nwant %q", got, want)
+		t.Fatalf("assigned, none cancelled:\n got %q\nwant %q", got, want)
 	}
 
-	got = pushRestartComment("", "", two)
+	// The card had no assignee: the comment says which state it sat in and
+	// that the push lifted it (push-to-parked-card design §3.3).
+	got = pushRestartComment(sha, "sterevdimitar", nil, "in_review", true)
+	want = "↻ Head moved to `d5a9163` (pushed by sterevdimitar) while this card sat at `in_review` with no assignee. Park lifted. Review restarted from the top."
+	if got != want {
+		t.Fatalf("parked, none cancelled:\n got %q\nwant %q", got, want)
+	}
+
+	got = pushRestartComment(sha, "sterevdimitar", []pushRestartTask{prTask("review-agent", "queued")}, "blocked", true)
+	want = "↻ Head moved to `d5a9163` (pushed by sterevdimitar) while this card sat at `blocked` with no assignee. Park lifted. Cancelled: review-agent (queued). Review restarted from the top."
+	if got != want {
+		t.Fatalf("blocked, one cancelled:\n got %q\nwant %q", got, want)
+	}
+
+	// An assigned card never gets the clause, whatever its status.
+	if got := pushRestartComment(sha, "sterevdimitar", nil, "in_review", false); strings.Contains(got, "no assignee") {
+		t.Fatalf("assigned card must not claim it was parked: %q", got)
+	}
+
+	got = pushRestartComment("", "", two, "in_progress", false)
 	if !strings.Contains(got, "`unknown`") || !strings.Contains(got, "an unknown sender") {
 		t.Fatalf("empty sha/sender: got %q", got)
 	}
 
 	for _, out := range []string{
-		pushRestartComment(sha, "sterevdimitar", two),
-		pushRestartComment(sha, "sterevdimitar", nil),
-		pushRestartComment("", "", nil),
-		pushRestartComment(sha, "mention://agent/x", two),
+		pushRestartComment(sha, "sterevdimitar", two, "in_progress", false),
+		pushRestartComment(sha, "sterevdimitar", nil, "in_review", true),
+		pushRestartComment("", "", nil, "", true),
+		pushRestartComment(sha, "mention://agent/x", two, "mention://agent/x", true),
 	} {
 		if strings.Contains(out, "mention://") {
-			t.Fatalf("I2: a restart comment must never carry a mention: %q", out)
+			t.Fatalf("P2: a restart comment must never carry a mention: %q", out)
+		}
+		if strings.HasPrefix(out, "/") {
+			t.Fatalf("a pipeline comment must never begin with a slash: %q", out)
 		}
 	}
 }

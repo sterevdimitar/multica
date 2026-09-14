@@ -135,10 +135,16 @@ func pullRequestPush(run db.AutopilotRun) (headSHA, sender string) {
 }
 
 // pushRestartComment renders the trace left on the card. It is built from
-// agent names (ours) and a SHA, and the sender — untrusted payload text — is
-// reduced to the characters a GitHub login can contain, so the body can never
-// carry a mention: a mention here would be a second dispatch.
-func pushRestartComment(headSHA, sender string, cancelled []pushRestartTask) string {
+// agent names (ours), a SHA, an issue status (ours), and the sender —
+// untrusted payload text — reduced to the characters a GitHub login can
+// contain, so the body can never carry a mention: a mention here would be a
+// second dispatch.
+//
+// When the card had no assignee at the push — parked at in_review, blocked
+// after a failed run — the comment says which state it sat in and that the
+// push lifted it, so a human reading the card knows the park did not
+// silently evaporate. An assigned card never gets that clause.
+func pushRestartComment(headSHA, sender string, cancelled []pushRestartTask, priorStatus string, wasUnassigned bool) string {
 	short := "unknown"
 	if headSHA != "" {
 		short = headSHA
@@ -157,7 +163,21 @@ func pushRestartComment(headSHA, sender string, cancelled []pushRestartTask) str
 		by = "an unknown sender"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "↻ Head moved to `%s` (pushed by %s).", short, by)
+	fmt.Fprintf(&b, "↻ Head moved to `%s` (pushed by %s)", short, by)
+	if wasUnassigned {
+		status := strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' || r == '_' {
+				return r
+			}
+			return -1
+		}, priorStatus)
+		if status == "" {
+			status = "unknown"
+		}
+		fmt.Fprintf(&b, " while this card sat at `%s` with no assignee. Park lifted.", status)
+	} else {
+		b.WriteString(".")
+	}
 	if len(cancelled) > 0 {
 		parts := make([]string, 0, len(cancelled))
 		for _, t := range cancelled {
@@ -233,6 +253,6 @@ func (s *AutopilotService) restartChainOnPush(ctx context.Context, ap db.Autopil
 		"issue_id", util.UUIDToString(issue.ID), "head", headSHA, "sender", sender,
 		"cancelled", len(cancelled), "planned", len(cancel))
 	s.TaskSvc.createAgentComment(ctx, issue.ID, ap.AssigneeID,
-		pushRestartComment(headSHA, sender, cancelled), "comment", pgtype.UUID{}, pgtype.UUID{})
+		pushRestartComment(headSHA, sender, cancelled, issue.Status, false), "comment", pgtype.UUID{}, pgtype.UUID{})
 	return issue, nil
 }
