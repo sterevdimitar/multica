@@ -50,6 +50,10 @@ var pushActiveStatuses = map[string]bool{
 	"dispatched":              true,
 	"running":                 true,
 	"waiting_local_directory": true,
+	// A retry the fork is holding (dispatch_timeout / timeout /
+	// push_rejected, 5 then 10 minutes) — a run that is still coming, for
+	// the old head. Every enumeration of live statuses includes it.
+	"deferred": true,
 }
 
 // pushExemptAgents reads MULTICA_PUSH_EXEMPT_AGENTS: a comma-separated list

@@ -97,6 +97,9 @@ func TestPlanPushRestart(t *testing.T) {
 		{"waiting_local_directory counts as active", true,
 			[]pushRestartTask{prTask("review-agent", "waiting_local_directory")}, fixerOnly,
 			[]string{"review-agent:waiting_local_directory"}, true},
+		{"a deferred fixer retry is for the old head: cancelled", true,
+			[]pushRestartTask{prTask("fixer", "deferred")}, fixerOnly,
+			[]string{"fixer:deferred"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
