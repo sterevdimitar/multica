@@ -82,8 +82,17 @@ type IssueProgressResponse struct {
 }
 
 // liveTaskStatuses are the statuses that mean "this step has not finished".
+//
+// `deferred` is a retry armed with a fire_at backoff — the 5/10-minute
+// GitHub-unreachable schedule — that has not fired yet. It is a run that is
+// still coming, so it is live: the popover draws it ⏸ (the web maps is_live
+// && status != running to that glyph) and nothing that asks "is anything
+// still coming on this card" may miss it. Every enumeration of live
+// statuses must include it (dev-command-center design
+// 2026-09-13-github-unreachable-retry, invariant 3).
 var liveTaskStatuses = map[string]bool{
 	"queued":     true,
+	"deferred":   true,
 	"dispatched": true,
 	"running":    true,
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	agentpkg "github.com/multica-ai/multica/server/pkg/agent"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // webhookCallbackTokenTTL is the lifetime of the per-task JWT the receiver
@@ -473,4 +474,39 @@ func (s *TaskService) MaybeDispatchNextQueuedWebhookTask(ctx context.Context, ag
 		"task_id", util.UUIDToString(next.ID),
 		"agent_id", util.UUIDToString(agentID))
 	s.dispatchWebhookTask(ctx, next, runtime, agent)
+}
+
+// PromoteDueDeferredWebhookTasks is the clock a deferred webhook retry has.
+// A retry child armed with a fire_at backoff — the 5/10-minute schedule for
+// dispatch_timeout, push_rejected and a webhook task's timeout — is created
+// `deferred`, and the only promotions upstream knows about run inside the
+// daemon's claim poll. A webhook runtime never claims, so without this the
+// child sat `deferred` forever: the retry appeared to be scheduled, logged
+// as scheduled, and never ran. Called from the server's sweeper tick.
+//
+// Each promoted row is announced and dispatched the way the enqueue sites
+// do it. No capacity leaves it `queued`, to drain through
+// MaybeDispatchNextQueuedWebhookTask like any other queued task; a false
+// from MaybeDispatchToWebhook is the feature flag being off, logged so a
+// misconfigured server says so instead of silently parking every retry at
+// `queued` until queuedTTLSeconds. Returns the number promoted.
+func (s *TaskService) PromoteDueDeferredWebhookTasks(ctx context.Context) int {
+	tasks, err := s.Queries.PromoteDueDeferredWebhookTasks(ctx)
+	if err != nil {
+		slog.Warn("webhook: promote due deferred tasks", "err", err)
+		return 0
+	}
+	for _, task := range tasks {
+		slog.Info("webhook: deferred retry promoted",
+			"task_id", util.UUIDToString(task.ID),
+			"agent_id", util.UUIDToString(task.AgentID),
+			"attempt", task.Attempt,
+			"max_attempts", task.MaxAttempts)
+		s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+		if !s.MaybeDispatchToWebhook(ctx, task) {
+			slog.Warn("webhook: promoted deferred retry was not dispatched (MULTICA_WEBHOOK_RUNTIME off or runtime not webhook); it stays queued",
+				"task_id", util.UUIDToString(task.ID))
+		}
+	}
+	return len(tasks)
 }

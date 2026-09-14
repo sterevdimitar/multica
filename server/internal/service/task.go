@@ -2939,7 +2939,25 @@ func (s *TaskService) observeChatOutputLocalPath(task db.AgentTaskQueue, body st
 // coarse bucket. Daemon callers that already produced a refined reason
 // (via classifyPoisonedError, the timeout / runtime classifier, etc.)
 // will have their value preserved untouched.
+// FailTask is FailTaskWithOutput with no summary — the shape every daemon
+// and sweeper caller uses.
 func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason string) (*db.AgentTaskQueue, error) {
+	return s.FailTaskWithOutput(ctx, taskID, errMsg, sessionID, workDir, failureReason, "")
+}
+
+// FailTaskWithOutput fails a task and, when `output` is non-empty, posts it
+// as the agent's comment on the issue — the run's summary, through the same
+// redact-then-truncate path CompleteTask's fallback uses. It exists for
+// dev-command-center's step-finalizer, which fails a fixer run as
+// push_rejected when its commits never reached GitHub: the fixer did real
+// work and said so, and that summary must reach the card even though the
+// task is failed. Posted on EVERY attempt, retry pending or not — unlike the
+// generic errMsg system comment below, which stays gated on "no retry
+// pending" because it is boilerplate ("task timed out") that the next
+// attempt will restate. Going through here rather than
+// /api/issues/{id}/comments matters: that HTTP handler runs the @-mention
+// scan, and this is agent-authored text.
+func (s *TaskService) FailTaskWithOutput(ctx context.Context, taskID pgtype.UUID, errMsg, sessionID, workDir, failureReason, output string) (*db.AgentTaskQueue, error) {
 	// MUL-2946: synthesise a refined reason from the error text whenever the
 	// caller didn't supply one. This is the last write-path guard against
 	// "agent_error" coarse rows ending up in agent_task_queue.failure_reason
@@ -2968,16 +2986,17 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 		if parent, perr := s.Queries.GetAgentTask(ctx, taskID); perr != nil {
 			slog.Warn("fail task auto-retry: load parent failed",
 				"task_id", util.UUIDToString(taskID), "error", perr)
-		} else if retryEligible(failureReason, parent) {
+		} else if webhook := s.isWebhookTask(ctx, parent); retryEligible(failureReason, parent, webhook) {
 			wantRetry = true
 			// Persist the reason-aware effective budget into the child so the
 			// retry chain self-describes (e.g. provider_network → max_attempts=3),
 			// rather than leaking a contradictory attempt=N/max_attempts=2 row.
-			retryMaxAttempts = pgtype.Int4{Int32: retryAttemptCeiling(failureReason, parent.MaxAttempts), Valid: true}
+			retryMaxAttempts = pgtype.Int4{Int32: retryAttemptCeiling(failureReason, parent.MaxAttempts, webhook), Valid: true}
 			// Defer this attempt when the reason's schedule calls for a backoff
-			// (provider_network's final attempt waits ~5s); a zero delay leaves
-			// fire_at NULL so the child is created immediately-claimable.
-			if delay := retryDelayForAttempt(failureReason, parent.Attempt); delay > 0 {
+			// (provider_network's final attempt waits ~5s; the GitHub-unreachable
+			// reasons wait 5 then 10 minutes); a zero delay leaves fire_at NULL
+			// so the child is created immediately-claimable.
+			if delay := retryDelayForAttempt(failureReason, parent.Attempt, webhook); delay > 0 {
 				retryFireAt = pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true}
 			}
 			if agent, aerr := s.Queries.GetAgent(ctx, parent.AgentID); aerr != nil {
@@ -3092,8 +3111,27 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 		)
 		if retried.Status == "queued" {
 			s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, *retried)
-			s.NotifyTaskEnqueued(ctx, *retried)
+			// The fifth enqueue site (see MaybeRetryFailedTask for the other
+			// four): /fail is the path dev-command-center's step-finalizer
+			// uses, and an immediate retry child created here had no
+			// dispatcher for a webhook runtime — NotifyTaskEnqueued is a
+			// daemon websocket wakeup — so it sat `queued` until
+			// queuedTTLSeconds. The GitHub-unreachable reasons are deferred
+			// and reach the sweeper instead, but every other retryable
+			// reason arriving over /fail is immediate and lands here.
+			if !s.MaybeDispatchToWebhook(ctx, *retried) {
+				s.NotifyTaskEnqueued(ctx, *retried)
+			}
 		}
+	}
+
+	// The run's summary, when the caller supplied one (FailTaskWithOutput):
+	// the agent's own comment, on every attempt. See the method comment for
+	// why this is not gated on `retried`.
+	if output != "" && task.IssueID.Valid {
+		body := util.UnescapeBackslashEscapes(output)
+		content := truncateFallbackCommentBody(redact.Text(body), maxSynthesizedFallbackCommentRunes)
+		s.createAgentComment(ctx, task.IssueID, task.AgentID, content, "comment", task.TriggerCommentID, task.ID)
 	}
 
 	// Skip the per-failure system comment when we'll immediately retry —
@@ -3197,8 +3235,50 @@ var retryableReasons = map[string]bool{
 	"runtime_recovery":          true,
 	"timeout":                   true,
 	"dispatch_timeout":          true,
+	"push_rejected":             true,
 	"codex_semantic_inactivity": true,
 	string(taskfailure.ReasonAgentProviderNetwork): true,
+}
+
+// githubUnreachableReasons are the failures where the receiver never got
+// GitHub's cooperation, seen from two sides of the same outage:
+//
+//	dispatch_timeout  GitHub never started the run (FailStaleWebhookTasks)
+//	push_rejected     the run finished but its commits never reached the
+//	                  remote (dev-command-center's step-finalizer)
+//
+// Both are webhook-only by construction — nothing else writes them. The
+// third member of the schedule, `timeout` on a webhook task (the run
+// started and no callback ever came: an orphaned GitHub Actions job), is
+// admitted by onGitHubUnreachableSchedule on the runtime mode, so the
+// daemon's `timeout` keeps its upstream behaviour.
+//
+// The schedule (dev-command-center design 2026-09-13-github-unreachable-
+// retry, D4): three attempts, the retries deferred 5 and then 10 minutes.
+// An immediate retry lands in the same wall during an incident; three
+// attempts over ~15 minutes of waiting cover a blip without turning an
+// hour-long outage into an hour of ghost runs. After the third failure
+// the existing path parks the card at `blocked` with the reason.
+//
+// push_rejected is deliberately NOT in resumeUnsafeFailureReason: the whole
+// value of its retry is that the fixer resumes its own session and rebuilds
+// the fix from memory rather than from scratch.
+var githubUnreachableReasons = map[string]bool{
+	"dispatch_timeout": true,
+	"push_rejected":    true,
+}
+
+const githubUnreachableMaxAttempts = 3
+
+// githubUnreachableRetryDelays is indexed by failedAttempt-1: the retry
+// after the first failure waits 5 minutes, the one after the second 10.
+var githubUnreachableRetryDelays = [...]time.Duration{5 * time.Minute, 10 * time.Minute}
+
+// onGitHubUnreachableSchedule reports whether a failure reason follows the
+// deferred 5/10-minute schedule. `webhook` is the failed task's runtime
+// mode (isWebhookTask); it only matters for `timeout`.
+func onGitHubUnreachableSchedule(reason string, webhook bool) bool {
+	return githubUnreachableReasons[reason] || (reason == "timeout" && webhook)
 }
 
 // Transient provider stream cuts (provider_network) get a bespoke three-tier
@@ -3222,12 +3302,17 @@ const (
 // child (CreateRetryTask's max_attempts) so the row stays self-consistent:
 // provider_network's chain records attempt=3, max_attempts=3, not a
 // contradictory attempt=3, max_attempts=2 (MUL-4910).
-func retryAttemptCeiling(reason string, taskMaxAttempts int32) int32 {
+//
+// `webhook` is the failed task's runtime mode; see onGitHubUnreachableSchedule.
+func retryAttemptCeiling(reason string, taskMaxAttempts int32, webhook bool) int32 {
 	if taskMaxAttempts <= 1 {
 		return taskMaxAttempts
 	}
 	if reason == string(taskfailure.ReasonAgentProviderNetwork) && taskMaxAttempts < providerNetworkMaxAttempts {
 		return providerNetworkMaxAttempts
+	}
+	if onGitHubUnreachableSchedule(reason, webhook) && taskMaxAttempts < githubUnreachableMaxAttempts {
+		return githubUnreachableMaxAttempts
 	}
 	return taskMaxAttempts
 }
@@ -3237,10 +3322,19 @@ func retryAttemptCeiling(reason string, taskMaxAttempts int32) int32 {
 // (~5s); every other retry — including provider_network's first — is immediate
 // (zero delay → the child is created 'queued', claimable at once). Callers pass
 // the returned delay to CreateRetryTask via fire_at.
-func retryDelayForAttempt(reason string, failedAttempt int32) time.Duration {
+//
+// The GitHub-unreachable schedule defers EVERY retry (5 min after the first
+// failure, 10 after the second); a failedAttempt past its table has no
+// retry to defer and reads 0. `webhook` as in onGitHubUnreachableSchedule.
+func retryDelayForAttempt(reason string, failedAttempt int32, webhook bool) time.Duration {
 	if reason == string(taskfailure.ReasonAgentProviderNetwork) &&
 		failedAttempt >= providerNetworkMaxAttempts-1 {
 		return providerNetworkFinalRetryWait
+	}
+	if onGitHubUnreachableSchedule(reason, webhook) {
+		if i := int(failedAttempt) - 1; i >= 0 && i < len(githubUnreachableRetryDelays) {
+			return githubUnreachableRetryDelays[i]
+		}
 	}
 	return 0
 }
@@ -3286,11 +3380,26 @@ func ResumeUnsafeFailure(failureReason, errorText string) bool {
 // not an autopilot run, and linked to an issue or chat session. Shared by
 // FailTask's in-transaction retry and the orphan sweeper's MaybeRetryFailedTask
 // so both agree on which failures re-run.
-func retryEligible(failureReason string, t db.AgentTaskQueue) bool {
+func retryEligible(failureReason string, t db.AgentTaskQueue, webhook bool) bool {
 	return retryableReasons[failureReason] &&
-		t.Attempt < retryAttemptCeiling(failureReason, t.MaxAttempts) &&
+		t.Attempt < retryAttemptCeiling(failureReason, t.MaxAttempts, webhook) &&
 		!t.AutopilotRunID.Valid &&
 		(t.IssueID.Valid || t.ChatSessionID.Valid)
+}
+
+// isWebhookTask reports whether a task's runtime is a webhook runtime. One
+// GetAgentRuntime on the failure path; any error reads as false, which
+// keeps the daemon schedule — the conservative answer, since the webhook
+// schedule only ever widens attempts and adds waits.
+func (s *TaskService) isWebhookTask(ctx context.Context, t db.AgentTaskQueue) bool {
+	if !t.RuntimeID.Valid {
+		return false
+	}
+	runtime, err := s.Queries.GetAgentRuntime(ctx, t.RuntimeID)
+	if err != nil {
+		return false
+	}
+	return runtime.RuntimeMode == "webhook"
 }
 
 // MaybeRetryFailedTask spawns a fresh queued attempt for a recently-failed
@@ -3318,20 +3427,23 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	// orphaned provider_network task recovered on its 2nd attempt is still
 	// allowed its deferred 3rd attempt (retryAttemptCeiling raises the ceiling
 	// to 3). Kept in sync with retryEligible below, which applies the same
-	// ceiling to the primary FailTask path.
-	if parent.Attempt >= retryAttemptCeiling(reason, parent.MaxAttempts) {
+	// ceiling to the primary FailTask path. The runtime mode is read once
+	// here and threaded through: `timeout` follows the GitHub-unreachable
+	// schedule only on a webhook task.
+	webhook := s.isWebhookTask(ctx, parent)
+	if parent.Attempt >= retryAttemptCeiling(reason, parent.MaxAttempts, webhook) {
 		slog.Info("task auto-retry skipped: budget exhausted",
 			"task_id", util.UUIDToString(parent.ID),
 			"attempt", parent.Attempt,
 			"max_attempts", parent.MaxAttempts,
-			"ceiling", retryAttemptCeiling(reason, parent.MaxAttempts),
+			"ceiling", retryAttemptCeiling(reason, parent.MaxAttempts, webhook),
 		)
 		return nil, nil
 	}
 	// Autopilot has its own retry semantics (don't double-trigger) and a task
 	// with no issue/chat link has nowhere to report its retry — retryEligible
 	// covers both, keeping this sweeper path in sync with FailTask's in-tx retry.
-	if !retryEligible(reason, parent) {
+	if !retryEligible(reason, parent, webhook) {
 		return nil, nil
 	}
 
@@ -3354,13 +3466,13 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	// NULL for an immediate child), and write the reason-aware ceiling into the
 	// child's max_attempts so the retry chain stays self-consistent.
 	var retryFireAt pgtype.Timestamptz
-	if delay := retryDelayForAttempt(reason, parent.Attempt); delay > 0 {
+	if delay := retryDelayForAttempt(reason, parent.Attempt, webhook); delay > 0 {
 		retryFireAt = pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true}
 	}
 	child, err := s.Queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{
 		ID:                   parent.ID,
 		FireAt:               retryFireAt,
-		MaxAttempts:          pgtype.Int4{Int32: retryAttemptCeiling(reason, parent.MaxAttempts), Valid: true},
+		MaxAttempts:          pgtype.Int4{Int32: retryAttemptCeiling(reason, parent.MaxAttempts, webhook), Valid: true},
 		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
 		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
 	})

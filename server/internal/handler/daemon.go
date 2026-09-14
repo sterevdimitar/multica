@@ -3592,6 +3592,13 @@ type TaskFailRequest struct {
 	SessionID     string `json:"session_id,omitempty"`
 	WorkDir       string `json:"work_dir,omitempty"`
 	FailureReason string `json:"failure_reason,omitempty"`
+	// Output is the agent's final summary, when the run produced one before
+	// being failed (dev-command-center's push_rejected: the fix exists, the
+	// push did not land). Posted as the run's comment through the same path
+	// /complete uses — redacted, truncated, no @-mention scan — on every
+	// attempt. Absent from the daemon's requests; see
+	// TaskService.FailTaskWithOutput.
+	Output string `json:"output,omitempty"`
 }
 
 func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
@@ -3609,7 +3616,7 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.TaskService.FailTask(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.FailureReason)
+	task, err := h.TaskService.FailTaskWithOutput(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.FailureReason, req.Output)
 	if err != nil {
 		slog.Warn("fail task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())

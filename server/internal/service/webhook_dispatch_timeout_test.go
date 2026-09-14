@@ -268,10 +268,15 @@ func TestHandleFailedWebhookTasksParksTheCard(t *testing.T) {
 
 // exhaustRetryBudget pins attempt to max_attempts so retryEligible refuses,
 // making the next failure terminal.
+// exhaustRetryBudget puts a task on its FINAL attempt. The ceiling is the
+// reason-aware one, not the max_attempts column: dispatch_timeout (what
+// these tests fail with) follows the GitHub-unreachable schedule, which
+// widens the budget to githubUnreachableMaxAttempts.
 func exhaustRetryBudget(t *testing.T, ctx context.Context, pool *pgxpool.Pool, taskID string) {
 	t.Helper()
 	if _, err := pool.Exec(ctx,
-		`UPDATE agent_task_queue SET attempt = max_attempts WHERE id = $1`, taskID); err != nil {
+		`UPDATE agent_task_queue SET attempt = GREATEST(max_attempts, $2::int) WHERE id = $1`,
+		taskID, githubUnreachableMaxAttempts); err != nil {
 		t.Fatalf("exhaust retry budget: %v", err)
 	}
 }

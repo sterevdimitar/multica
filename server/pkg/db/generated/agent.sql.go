@@ -4598,6 +4598,97 @@ func (q *Queries) PromoteDueDeferredTasksForRuntimes(ctx context.Context, runtim
 	return items, nil
 }
 
+const promoteDueDeferredWebhookTasks = `-- name: PromoteDueDeferredWebhookTasks :many
+UPDATE agent_task_queue
+SET status = 'queued'
+WHERE status = 'deferred'
+  AND fire_at <= now()
+  AND EXISTS (
+    SELECT 1 FROM agent_runtime wr
+    WHERE wr.id = agent_task_queue.runtime_id
+      AND wr.runtime_mode = 'webhook'
+  )
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id
+`
+
+// The webhook-runtime counterpart to the two promotions above, run from the
+// server's sweeper tick rather than from a claim. Those run only inside the
+// daemon's ClaimTask poll, and a webhook runtime never claims — it is a
+// stateless HTTP receiver — so a deferred webhook row (a retry armed with a
+// fire_at backoff: the 5/10-minute GitHub-unreachable schedule) had no clock
+// at all and stayed `deferred` forever. This query is that clock. The
+// runtime_mode join keeps daemon rows out: those are promoted at claim time
+// with the daemon wakeup that must follow, and promoting them here would
+// race the poll for the same row. The service dispatches each returned row
+// to its webhook (PromoteDueDeferredWebhookTasks).
+func (q *Queries) PromoteDueDeferredWebhookTasks(ctx context.Context) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, promoteDueDeferredWebhookTasks)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.IsLeaderTask,
+			&i.WaitReason,
+			&i.InitiatorUserID,
+			&i.HandoffNote,
+			&i.PrepareLeaseExpiresAt,
+			&i.SquadID,
+			&i.RuntimeMcpOverlay,
+			&i.EscalationForTaskID,
+			&i.FireAt,
+			&i.OriginatorUserID,
+			&i.RuntimeConnectedApps,
+			&i.CoalescedCommentIds,
+			&i.DeliveredCommentIds,
+			&i.ChatInputTaskID,
+			&i.ChatFinalizeDeferredAt,
+			&i.OriginatorSource,
+			&i.DelegatedFromTaskID,
+			&i.RetryOfTaskID,
+			&i.RerunOfTaskID,
+			&i.RuleVersionID,
+			&i.TriggerEvidenceKind,
+			&i.TriggerEvidenceRefID,
+			&i.AccountableUserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const reclaimStaleDispatchedTaskForRuntime = `-- name: ReclaimStaleDispatchedTaskForRuntime :one
 UPDATE agent_task_queue
 SET dispatched_at = now(),
