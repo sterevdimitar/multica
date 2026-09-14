@@ -145,7 +145,7 @@ describe("IssueAgentActivityIndicator", () => {
       <IssueAgentActivityIndicator issueId="issue-1" />,
     );
 
-    expect(container.textContent).toContain("🪙 38.2k");
+    expect(container.textContent).toContain("🪙 38k");
   });
 
   // On the Deep Infra / GLM route the per-block usage is all-zero while

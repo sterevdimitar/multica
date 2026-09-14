@@ -251,7 +251,7 @@ describe("PastRow metrics", () => {
     );
 
     expect(screen.getByText("4m 12s")).toBeInTheDocument();
-    expect(screen.getByText("38.2k")).toBeInTheDocument();
+    expect(screen.getByText("38k")).toBeInTheDocument();
     expect(screen.getByText("14")).toBeInTheDocument();
   });
 
@@ -274,7 +274,7 @@ describe("PastRow metrics", () => {
     // RowStatus is hidden on hover so RowActions can take its place. Metrics
     // must not live inside it, or they would vanish exactly when the user
     // reaches for the row.
-    const tokens = screen.getByText("38.2k");
+    const tokens = screen.getByText("38k");
     const hoverHidden = tokens.closest(
       "[class*='group-hover/execution-log-row:hidden']",
     );
