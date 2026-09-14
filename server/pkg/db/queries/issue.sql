@@ -138,6 +138,19 @@ UPDATE issue SET
 WHERE id = $1 AND workspace_id = $3
 RETURNING *;
 
+-- name: UpdateIssueAssignee :one
+-- Sets only the assignee pair. UpdateIssue clears every narg it is not given
+-- (start_date, due_date, parent_issue_id, project_id, stage), so it is the
+-- wrong tool for a caller that knows nothing but the new assignee — the
+-- autopilot's push-restart path, which hands a card back to the chain's
+-- entry agent without touching anything else on it.
+UPDATE issue SET
+    assignee_type = $2,
+    assignee_id = $3,
+    updated_at = now()
+WHERE id = $1
+RETURNING *;
+
 -- name: UpdateIssueStatusIfCurrent :one
 -- Guarded variant of UpdateIssueStatus. The lifecycle writers in
 -- issue_lifecycle.go (MarkIssueRunning, MarkIssueBlocked) used to read the
