@@ -1443,28 +1443,23 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 	return i, err
 }
 
-const updateIssueAssignee = `-- name: UpdateIssueAssignee :one
+const updateIssueStatus = `-- name: UpdateIssueStatus :one
 UPDATE issue SET
-    assignee_type = $2,
-    assignee_id = $3,
+    status = $2,
     updated_at = now()
-WHERE id = $1
+WHERE id = $1 AND workspace_id = $3
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
-type UpdateIssueAssigneeParams struct {
-	ID           pgtype.UUID `json:"id"`
-	AssigneeType pgtype.Text `json:"assignee_type"`
-	AssigneeID   pgtype.UUID `json:"assignee_id"`
+type UpdateIssueStatusParams struct {
+	ID          pgtype.UUID `json:"id"`
+	Status      string      `json:"status"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
-// Sets only the assignee pair. UpdateIssue clears every narg it is not given
-// (start_date, due_date, parent_issue_id, project_id, stage), so it is the
-// wrong tool for a caller that knows nothing but the new assignee — the
-// autopilot's push-restart path, which hands a card back to the chain's
-// entry agent without touching anything else on it.
-func (q *Queries) UpdateIssueAssignee(ctx context.Context, arg UpdateIssueAssigneeParams) (Issue, error) {
-	row := q.db.QueryRow(ctx, updateIssueAssignee, arg.ID, arg.AssigneeType, arg.AssigneeID)
+// Workspace_id in the WHERE clause is a SQL-layer tenant guard; see DeleteIssue.
+func (q *Queries) UpdateIssueStatus(ctx context.Context, arg UpdateIssueStatusParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueStatus, arg.ID, arg.Status, arg.WorkspaceID)
 	var i Issue
 	err := row.Scan(
 		&i.ID,
@@ -1497,23 +1492,40 @@ func (q *Queries) UpdateIssueAssignee(ctx context.Context, arg UpdateIssueAssign
 	return i, err
 }
 
-const updateIssueStatus = `-- name: UpdateIssueStatus :one
+const updateIssueStatusAndAssign = `-- name: UpdateIssueStatusAndAssign :one
 UPDATE issue SET
     status = $2,
+    assignee_type = $3,
+    assignee_id = $4,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3
+WHERE id = $1 AND workspace_id = $5
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
-type UpdateIssueStatusParams struct {
-	ID          pgtype.UUID `json:"id"`
-	Status      string      `json:"status"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
+type UpdateIssueStatusAndAssignParams struct {
+	ID           pgtype.UUID `json:"id"`
+	Status       string      `json:"status"`
+	AssigneeType pgtype.Text `json:"assignee_type"`
+	AssigneeID   pgtype.UUID `json:"assignee_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
 }
 
-// Workspace_id in the WHERE clause is a SQL-layer tenant guard; see DeleteIssue.
-func (q *Queries) UpdateIssueStatus(ctx context.Context, arg UpdateIssueStatusParams) (Issue, error) {
-	row := q.db.QueryRow(ctx, updateIssueStatus, arg.ID, arg.Status, arg.WorkspaceID)
+// The mirror of UpdateIssueStatusAndUnassign, for the one automated writer
+// allowed to take a card OUT of a park: the autopilot's push-restart path
+// (push_restart.go). A pull-request push is the human act it reacts to, so
+// it may write in_progress over in_review — which MarkIssueRunning refuses
+// on purpose — and it must set the assignee in the same statement: a card
+// left in_progress with no assignee wakes nobody on the next comment, and a
+// card left in_review with an assignee reads as a park to the board and as
+// no hold to the pipeline. Workspace_id in the WHERE is the tenant guard.
+func (q *Queries) UpdateIssueStatusAndAssign(ctx context.Context, arg UpdateIssueStatusAndAssignParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, updateIssueStatusAndAssign,
+		arg.ID,
+		arg.Status,
+		arg.AssigneeType,
+		arg.AssigneeID,
+		arg.WorkspaceID,
+	)
 	var i Issue
 	err := row.Scan(
 		&i.ID,

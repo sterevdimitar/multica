@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"sort"
@@ -57,56 +58,58 @@ func names(ts []pushRestartTask) []string {
 func TestPlanPushRestart(t *testing.T) {
 	fixerOnly := map[string]bool{"fixer": true}
 	cases := []struct {
-		name        string
-		assigned    bool
-		tasks       []pushRestartTask
-		exempt      map[string]bool
-		wantCancel  []string
-		wantRestart bool
+		name       string
+		tasks      []pushRestartTask
+		exempt     map[string]bool
+		wantCancel []string
 	}{
-		{"reviewer running", true,
+		{"reviewer running",
 			[]pushRestartTask{prTask("review-agent", "running")}, fixerOnly,
-			[]string{"review-agent:running"}, true},
-		{"validator running", true,
+			[]string{"review-agent:running"}},
+		{"validator running",
 			[]pushRestartTask{prTask("review-agent", "completed"), prTask("review-validator-agent", "running")}, fixerOnly,
-			[]string{"review-validator-agent:running"}, true},
-		{"fixer running (its own push)", true,
+			[]string{"review-validator-agent:running"}},
+		{"fixer running (its own push)",
 			[]pushRestartTask{prTask("fixer", "running")}, fixerOnly,
-			[]string{}, true},
-		{"fixer running + queued reviewer", true,
+			[]string{}},
+		{"fixer running + queued reviewer",
 			[]pushRestartTask{prTask("fixer", "running"), prTask("review-agent", "queued")}, fixerOnly,
-			[]string{"review-agent:queued"}, true},
-		{"fixer queued is not exempt", true,
+			[]string{"review-agent:queued"}},
+		{"fixer queued is not exempt",
 			[]pushRestartTask{prTask("fixer", "queued")}, fixerOnly,
-			[]string{"fixer:queued"}, true},
-		{"fixer dispatched is exempt", true,
+			[]string{"fixer:queued"}},
+		{"fixer dispatched is exempt",
 			[]pushRestartTask{prTask("fixer", "dispatched")}, fixerOnly,
-			[]string{}, true},
-		{"judge running", true,
+			[]string{}},
+		{"judge running",
 			[]pushRestartTask{prTask("readiness-agent", "running")}, fixerOnly,
-			[]string{"readiness-agent:running"}, true},
-		{"nothing active", true,
+			[]string{"readiness-agent:running"}},
+		{"nothing active",
 			[]pushRestartTask{prTask("review-agent", "completed"), prTask("fixer", "failed"), prTask("fixer", "cancelled")}, fixerOnly,
-			[]string{}, true},
-		{"no assignee: untouched", false,
+			[]string{}},
+		// A parked or blocked card is not a special case any more: the plan
+		// does not know or care whether the card has an assignee
+		// (push-to-parked-card design §3.1). The same tasks get the same
+		// answer; the executor writes the assignee back.
+		{"parked card with a stale reviewer: cancelled like any other",
 			[]pushRestartTask{prTask("review-agent", "running")}, fixerOnly,
-			[]string{}, false},
-		{"empty exempt set cancels a running fixer", true,
+			[]string{"review-agent:running"}},
+		{"parked card with the fixer running through the park (card 221): fixer kept",
+			[]pushRestartTask{prTask("fixer", "running")}, fixerOnly,
+			[]string{}},
+		{"empty exempt set cancels a running fixer",
 			[]pushRestartTask{prTask("fixer", "running")}, map[string]bool{},
-			[]string{"fixer:running"}, true},
-		{"waiting_local_directory counts as active", true,
+			[]string{"fixer:running"}},
+		{"waiting_local_directory counts as active",
 			[]pushRestartTask{prTask("review-agent", "waiting_local_directory")}, fixerOnly,
-			[]string{"review-agent:waiting_local_directory"}, true},
-		{"a deferred fixer retry is for the old head: cancelled", true,
+			[]string{"review-agent:waiting_local_directory"}},
+		{"a deferred fixer retry is for the old head: cancelled",
 			[]pushRestartTask{prTask("fixer", "deferred")}, fixerOnly,
-			[]string{"fixer:deferred"}, true},
+			[]string{"fixer:deferred"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cancel, restart := planPushRestart(tc.assigned, tc.tasks, tc.exempt)
-			if restart != tc.wantRestart {
-				t.Fatalf("restart = %v, want %v", restart, tc.wantRestart)
-			}
+			cancel := planPushRestart(tc.tasks, tc.exempt)
 			if got := names(cancel); !reflect.DeepEqual(got, tc.wantCancel) {
 				t.Fatalf("cancel = %v, want %v", got, tc.wantCancel)
 			}
@@ -146,31 +149,71 @@ func TestPushRestartComment(t *testing.T) {
 	sha := "d5a9163c77f31dc7cc601b1553e19f4cb57c89c5"
 	two := []pushRestartTask{prTask("review-agent", "running"), prTask("fixer", "queued")}
 
-	got := pushRestartComment(sha, "sterevdimitar", two)
+	got := pushRestartComment(sha, "sterevdimitar", two, "in_progress", false)
 	want := "↻ Head moved to `d5a9163` (pushed by sterevdimitar). Cancelled: review-agent (running), fixer (queued). Review restarted from the top."
 	if got != want {
-		t.Fatalf("two cancelled:\n got %q\nwant %q", got, want)
+		t.Fatalf("assigned, two cancelled:\n got %q\nwant %q", got, want)
 	}
 
-	got = pushRestartComment(sha, "sterevdimitar", nil)
+	got = pushRestartComment(sha, "sterevdimitar", nil, "in_progress", false)
 	want = "↻ Head moved to `d5a9163` (pushed by sterevdimitar). Review restarted from the top."
 	if got != want {
-		t.Fatalf("none cancelled:\n got %q\nwant %q", got, want)
+		t.Fatalf("assigned, none cancelled:\n got %q\nwant %q", got, want)
 	}
 
-	got = pushRestartComment("", "", two)
+	// The card had no assignee: the comment says which state it sat in and
+	// that the push lifted it (push-to-parked-card design §3.3).
+	got = pushRestartComment(sha, "sterevdimitar", nil, "in_review", true)
+	want = "↻ Head moved to `d5a9163` (pushed by sterevdimitar) while this card sat at `in_review` with no assignee. Park lifted. Review restarted from the top."
+	if got != want {
+		t.Fatalf("parked, none cancelled:\n got %q\nwant %q", got, want)
+	}
+
+	got = pushRestartComment(sha, "sterevdimitar", []pushRestartTask{prTask("review-agent", "queued")}, "blocked", true)
+	want = "↻ Head moved to `d5a9163` (pushed by sterevdimitar) while this card sat at `blocked` with no assignee. Park lifted. Cancelled: review-agent (queued). Review restarted from the top."
+	if got != want {
+		t.Fatalf("blocked, one cancelled:\n got %q\nwant %q", got, want)
+	}
+
+	// An assigned card never gets the clause, whatever its status.
+	if got := pushRestartComment(sha, "sterevdimitar", nil, "in_review", false); strings.Contains(got, "no assignee") {
+		t.Fatalf("assigned card must not claim it was parked: %q", got)
+	}
+
+	got = pushRestartComment("", "", two, "in_progress", false)
 	if !strings.Contains(got, "`unknown`") || !strings.Contains(got, "an unknown sender") {
 		t.Fatalf("empty sha/sender: got %q", got)
 	}
 
 	for _, out := range []string{
-		pushRestartComment(sha, "sterevdimitar", two),
-		pushRestartComment(sha, "sterevdimitar", nil),
-		pushRestartComment("", "", nil),
-		pushRestartComment(sha, "mention://agent/x", two),
+		pushRestartComment(sha, "sterevdimitar", two, "in_progress", false),
+		pushRestartComment(sha, "sterevdimitar", nil, "in_review", true),
+		pushRestartComment("", "", nil, "", true),
+		pushRestartComment(sha, "mention://agent/x", two, "mention://agent/x", true),
 	} {
 		if strings.Contains(out, "mention://") {
-			t.Fatalf("I2: a restart comment must never carry a mention: %q", out)
+			t.Fatalf("P2: a restart comment must never carry a mention: %q", out)
 		}
+		if strings.HasPrefix(out, "/") {
+			t.Fatalf("a pipeline comment must never begin with a slash: %q", out)
+		}
+	}
+}
+
+func TestPushRestartFailedComment(t *testing.T) {
+	sha := "d5a9163c77f31dc7cc601b1553e19f4cb57c89c5"
+	got := pushRestartFailedComment(sha, "sterevdimitar", errors.New("enqueue task for issue: agent is archived"))
+	want := "⚠ Head moved to `d5a9163` (pushed by sterevdimitar), but the pipeline could not restart the review: enqueue task for issue: agent is archived. Re-assign an agent to this card to review the new head."
+	if got != want {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+	// The cause is internal text, but it is still neutralised the way every
+	// pipeline comment neutralises interpolated text (P2).
+	got = pushRestartFailedComment(sha, "x", errors.New("see mention://agent/abc\n`now`"))
+	if strings.Contains(got, "mention://") || strings.Contains(got, "\n") || strings.Contains(got, "`now`") {
+		t.Fatalf("cause not neutralised: %q", got)
+	}
+	if strings.HasPrefix(got, "/") {
+		t.Fatalf("must never begin with a slash: %q", got)
 	}
 }
