@@ -310,15 +310,18 @@ export function shortFailureReason(reason: string): string {
 }
 
 /**
- * Compact token count: exact below 1000, then one decimal with a unit.
- * null is a dash, mirroring formatCost — see knownTokens for why 0 is never
- * a measurement.
+ * Compact token count: exact below 1000, then a whole number with a unit
+ * ("38k", "1M") — the popover is read at a glance, and a decimal is noise
+ * there. Rounding happens before the unit is chosen so 999,500 reads "1M",
+ * never "1000k". null is a dash, mirroring formatCost — see knownTokens for
+ * why 0 is never a measurement.
  */
 export function formatTokens(n: number | null): string {
   if (n === null) return "—";
   if (n < 1_000) return String(n);
-  if (n < 1_000_000) return `${(n / 1_000).toFixed(1)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  const k = Math.round(n / 1_000);
+  if (k < 1_000) return `${k}k`;
+  return `${Math.round(n / 1_000_000)}M`;
 }
 
 /** Short step labels for the badge and the popover's Step column. */

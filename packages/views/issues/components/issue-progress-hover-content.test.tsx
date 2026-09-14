@@ -100,11 +100,11 @@ describe("IssueProgressHoverContent", () => {
 
     const { rerender } = renderContent(<IssueProgressHoverContent issueId="i1" />);
 
-    // 30000 + 8000 + 234 = 38234 → "38.2k" (cache reads excluded)
-    expect(rowCells("review")).toEqual(["✓review", "4:00", "38.2k", "$0.16", "14"]);
+    // 30000 + 8000 + 234 = 38234 → "38k" (cache reads excluded)
+    expect(rowCells("review")).toEqual(["✓review", "4:00", "38k", "$0.16", "14"]);
     // live row started 10:10:00, now 10:11:30 → 1:30
     // A live row has no stored cost yet: a dash, never $0.00.
-    expect(rowCells("fixer")).toEqual(["▶fixer", "1:30", "1.2k", "—", "3"]);
+    expect(rowCells("fixer")).toEqual(["▶fixer", "1:30", "1k", "—", "3"]);
 
     vi.advanceTimersByTime(1000);
     rerender(<div />); // flush the interval-driven state update
@@ -300,7 +300,7 @@ describe("IssueProgressHoverContent", () => {
     expect(readinessRow.className).toContain("text-muted-foreground");
     expect(screen.getByText("Step 2 of 2")).toBeTruthy();
     const footer = Array.from(document.querySelectorAll("tfoot td")).map((td) => td.textContent);
-    expect(footer).toEqual(["Completed", "6:26", "246.7k", "$0.06", "23"]);
+    expect(footer).toEqual(["Completed", "6:26", "247k", "$0.06", "23"]);
   });
 
   it("renders history with no live row and a Completed footer when nothing runs", () => {
