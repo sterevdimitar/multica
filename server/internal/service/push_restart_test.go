@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"sort"
@@ -196,5 +197,23 @@ func TestPushRestartComment(t *testing.T) {
 		if strings.HasPrefix(out, "/") {
 			t.Fatalf("a pipeline comment must never begin with a slash: %q", out)
 		}
+	}
+}
+
+func TestPushRestartFailedComment(t *testing.T) {
+	sha := "d5a9163c77f31dc7cc601b1553e19f4cb57c89c5"
+	got := pushRestartFailedComment(sha, "sterevdimitar", errors.New("enqueue task for issue: agent is archived"))
+	want := "⚠ Head moved to `d5a9163` (pushed by sterevdimitar), but the pipeline could not restart the review: enqueue task for issue: agent is archived. Re-assign an agent to this card to review the new head."
+	if got != want {
+		t.Fatalf("\n got %q\nwant %q", got, want)
+	}
+	// The cause is internal text, but it is still neutralised the way every
+	// pipeline comment neutralises interpolated text (P2).
+	got = pushRestartFailedComment(sha, "x", errors.New("see mention://agent/abc\n`now`"))
+	if strings.Contains(got, "mention://") || strings.Contains(got, "\n") || strings.Contains(got, "`now`") {
+		t.Fatalf("cause not neutralised: %q", got)
+	}
+	if strings.HasPrefix(got, "/") {
+		t.Fatalf("must never begin with a slash: %q", got)
 	}
 }

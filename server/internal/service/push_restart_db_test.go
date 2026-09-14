@@ -174,6 +174,34 @@ func pushRestartServices(pool *pgxpool.Pool) *AutopilotService {
 	}
 }
 
+// issueState reads the two columns the restart writes together.
+func issueState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id pgtype.UUID) (status string, assignee pgtype.UUID) {
+	t.Helper()
+	if err := pool.QueryRow(ctx, `SELECT status, assignee_id FROM issue WHERE id = $1`, id).Scan(&status, &assignee); err != nil {
+		t.Fatalf("issue state: %v", err)
+	}
+	return status, assignee
+}
+
+// park puts the fixture card into the unassigned shape under test — the
+// exact rows the fork's /park (UpdateIssueStatusAndUnassign), the readiness
+// gate's needs-human PUT, and MarkIssueBlocked each write.
+func (f pushRestartFixture) park(t *testing.T, ctx context.Context, pool *pgxpool.Pool, status string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE issue SET assignee_type = NULL, assignee_id = NULL, status = $2 WHERE id = $1`, f.issueID, status); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func uuidString(t *testing.T, u pgtype.UUID) string {
+	t.Helper()
+	v, err := u.Value()
+	if err != nil {
+		t.Fatalf("uuid value: %v", err)
+	}
+	return v.(string)
+}
+
 func TestRestartChainOnPush(t *testing.T) {
 	pool := newPushRestartPool(t)
 	ctx := context.Background()
@@ -197,8 +225,8 @@ func TestRestartChainOnPush(t *testing.T) {
 		if s := taskStatus(t, ctx, pool, reviewer); s != "cancelled" {
 			t.Fatalf("reviewer task status = %q, want cancelled", s)
 		}
-		if got.AssigneeID != f.agents["review-agent"] {
-			t.Fatalf("assignee moved: %v", got.AssigneeID)
+		if got.AssigneeID != f.agents["review-agent"] || got.Status != StatusInProgress {
+			t.Fatalf("card = %s/%v, want in_progress/reviewer", got.Status, got.AssigneeID)
 		}
 		cs := issueComments(t, ctx, pool, f.issueID)
 		if len(cs) != 1 {
@@ -207,11 +235,11 @@ func TestRestartChainOnPush(t *testing.T) {
 		if cs[0].author != f.agents["review-agent"] {
 			t.Fatalf("comment author = %v, want the entry agent", cs[0].author)
 		}
-		if !strings.Contains(cs[0].content, "`d5a9163`") || !strings.Contains(cs[0].content, "review-agent (running)") {
+		if !strings.Contains(cs[0].content, "`d5a9163`") || !strings.Contains(cs[0].content, "review-agent (running)") || strings.Contains(cs[0].content, "no assignee") {
 			t.Fatalf("comment = %q", cs[0].content)
 		}
 		if strings.Contains(cs[0].content, "mention://") {
-			t.Fatalf("I2 violated: %q", cs[0].content)
+			t.Fatalf("P2 violated: %q", cs[0].content)
 		}
 	})
 
@@ -238,12 +266,9 @@ func TestRestartChainOnPush(t *testing.T) {
 		if got.AssigneeID != f.agents["review-agent"] || got.AssigneeType.String != "agent" {
 			t.Fatalf("returned issue assignee = %v/%q, want the reviewer", got.AssigneeID, got.AssigneeType.String)
 		}
-		var persisted pgtype.UUID
-		if err := pool.QueryRow(ctx, `SELECT assignee_id FROM issue WHERE id = $1`, f.issueID).Scan(&persisted); err != nil {
-			t.Fatal(err)
-		}
-		if persisted != f.agents["review-agent"] {
-			t.Fatalf("persisted assignee = %v, want the reviewer", persisted)
+		status, persisted := issueState(t, ctx, pool, f.issueID)
+		if persisted != f.agents["review-agent"] || status != StatusInProgress {
+			t.Fatalf("persisted = %s/%v, want in_progress/reviewer", status, persisted)
 		}
 		if cs := issueComments(t, ctx, pool, f.issueID); len(cs) != 1 {
 			t.Fatalf("comments = %d, want 1", len(cs))
@@ -276,13 +301,18 @@ func TestRestartChainOnPush(t *testing.T) {
 		}
 	})
 
-	t.Run("no assignee: nothing cancelled, no comment, issue returned unchanged", func(t *testing.T) {
+	// ---- the rows the push-to-parked-card design adds (§3.1) -----------
+	//
+	// The fork's /park writes in_review + both assignee fields NULL through
+	// UpdateIssueStatusAndUnassign — byte-identical to what park() seeds —
+	// and the restart reads nothing but the card row and its tasks (P4), so
+	// a human's /park and the pipeline's park are one case here.
+
+	t.Run("parked at in_review with a stale reviewer: cancelled, card taken back, park named in the comment", func(t *testing.T) {
 		f := createPushRestartFixture(t, ctx, pool)
 		svc := pushRestartServices(pool)
 		reviewer := f.addTask(t, ctx, pool, "review-agent", "running")
-		if _, err := pool.Exec(ctx, `UPDATE issue SET assignee_type = NULL, assignee_id = NULL, status = 'in_review' WHERE id = $1`, f.issueID); err != nil {
-			t.Fatal(err)
-		}
+		f.park(t, ctx, pool, "in_review")
 		issue, err := svc.Queries.GetIssue(ctx, f.issueID)
 		if err != nil {
 			t.Fatal(err)
@@ -293,14 +323,157 @@ func TestRestartChainOnPush(t *testing.T) {
 		if err != nil {
 			t.Fatalf("restartChainOnPush: %v", err)
 		}
-		if s := taskStatus(t, ctx, pool, reviewer); s != "running" {
-			t.Fatalf("parked card: reviewer status = %q, want running (untouched)", s)
+		if s := taskStatus(t, ctx, pool, reviewer); s != "cancelled" {
+			t.Fatalf("stale reviewer status = %q, want cancelled", s)
 		}
-		if got.AssigneeID.Valid {
-			t.Fatalf("parked card must not be re-assigned: %v", got.AssigneeID)
+		if got.Status != StatusInProgress || got.AssigneeType.String != "agent" || got.AssigneeID != f.agents["review-agent"] {
+			t.Fatalf("returned card = %s/%q/%v, want in_progress/agent/reviewer", got.Status, got.AssigneeType.String, got.AssigneeID)
 		}
-		if cs := issueComments(t, ctx, pool, f.issueID); len(cs) != 0 {
-			t.Fatalf("parked card must get no comment: %+v", cs)
+		status, assignee := issueState(t, ctx, pool, f.issueID)
+		if status != StatusInProgress || assignee != f.agents["review-agent"] {
+			t.Fatalf("persisted card = %s/%v, want in_progress/reviewer", status, assignee)
+		}
+		cs := issueComments(t, ctx, pool, f.issueID)
+		if len(cs) != 1 {
+			t.Fatalf("comments = %d, want 1", len(cs))
+		}
+		if !strings.Contains(cs[0].content, "sat at `in_review` with no assignee") || !strings.Contains(cs[0].content, "Park lifted") || !strings.Contains(cs[0].content, "review-agent (running)") {
+			t.Fatalf("comment = %q", cs[0].content)
+		}
+		if cs[0].author != f.agents["review-agent"] {
+			t.Fatalf("comment author = %v, want the entry agent", cs[0].author)
+		}
+	})
+
+	t.Run("blocked, nothing active: card taken back, comment names blocked", func(t *testing.T) {
+		f := createPushRestartFixture(t, ctx, pool)
+		svc := pushRestartServices(pool)
+		f.addTask(t, ctx, pool, "review-agent", "failed")
+		f.park(t, ctx, pool, "blocked")
+		issue, err := svc.Queries.GetIssue(ctx, f.issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ap := db.Autopilot{AssigneeType: "agent", AssigneeID: f.agents["review-agent"]}
+
+		if _, err := svc.restartChainOnPush(ctx, ap, run, issue); err != nil {
+			t.Fatalf("restartChainOnPush: %v", err)
+		}
+		status, assignee := issueState(t, ctx, pool, f.issueID)
+		if status != StatusInProgress || assignee != f.agents["review-agent"] {
+			t.Fatalf("persisted card = %s/%v, want in_progress/reviewer", status, assignee)
+		}
+		cs := issueComments(t, ctx, pool, f.issueID)
+		if len(cs) != 1 || !strings.Contains(cs[0].content, "sat at `blocked` with no assignee") || strings.Contains(cs[0].content, "Cancelled") {
+			t.Fatalf("comment = %+v", cs)
+		}
+	})
+
+	t.Run("card 221: parked at in_review while the fixer runs through the park — fixer kept, card taken back", func(t *testing.T) {
+		f := createPushRestartFixture(t, ctx, pool)
+		svc := pushRestartServices(pool)
+		fixer := f.addTask(t, ctx, pool, "fixer", "running")
+		f.park(t, ctx, pool, "in_review")
+		issue, err := svc.Queries.GetIssue(ctx, f.issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ap := db.Autopilot{AssigneeType: "agent", AssigneeID: f.agents["review-agent"]}
+
+		if _, err := svc.restartChainOnPush(ctx, ap, run, issue); err != nil {
+			t.Fatalf("restartChainOnPush: %v", err)
+		}
+		if s := taskStatus(t, ctx, pool, fixer); s != "running" {
+			t.Fatalf("fixer status = %q, want running (exempt)", s)
+		}
+		status, assignee := issueState(t, ctx, pool, f.issueID)
+		if status != StatusInProgress || assignee != f.agents["review-agent"] {
+			t.Fatalf("persisted card = %s/%v, want in_progress/reviewer", status, assignee)
+		}
+		cs := issueComments(t, ctx, pool, f.issueID)
+		if len(cs) != 1 || strings.Contains(cs[0].content, "fixer") || !strings.Contains(cs[0].content, "no assignee") {
+			t.Fatalf("comment = %+v", cs)
+		}
+	})
+
+	t.Run("P1: the status-and-assignee write lands before the comment, in one statement", func(t *testing.T) {
+		f := createPushRestartFixture(t, ctx, pool)
+		svc := pushRestartServices(pool)
+		f.park(t, ctx, pool, "in_review")
+		issue, err := svc.Queries.GetIssue(ctx, f.issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A BEFORE INSERT trigger on comment, scoped to this issue, refuses
+		// the trace unless the card is already in_progress WITH an assignee.
+		// If the write were two statements, or came after the comment, the
+		// trigger raises, createAgentComment logs the refusal, and the
+		// comment count below is 0.
+		suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+		fn, trg := "prt_restart_before_comment_"+suffix, "prt_trg_restart_before_comment_"+suffix
+		drop := func() {
+			_, _ = pool.Exec(context.Background(), "DROP TRIGGER IF EXISTS "+trg+" ON comment")
+			_, _ = pool.Exec(context.Background(), "DROP FUNCTION IF EXISTS "+fn+"()")
+		}
+		t.Cleanup(drop)
+		if _, err := pool.Exec(ctx, fmt.Sprintf(`
+			CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+			DECLARE st text; asg uuid;
+			BEGIN
+				SELECT status, assignee_id INTO st, asg FROM issue WHERE id = NEW.issue_id;
+				IF st <> 'in_progress' OR asg IS NULL THEN
+					RAISE EXCEPTION 'restart trace inserted before the card was in_progress with an assignee (status=%%, assignee=%%)', st, asg;
+				END IF;
+				RETURN NEW;
+			END; $$;`, fn)); err != nil {
+			t.Fatalf("create trigger function: %v", err)
+		}
+		if _, err := pool.Exec(ctx, fmt.Sprintf(`
+			CREATE TRIGGER %s BEFORE INSERT ON comment FOR EACH ROW
+			WHEN (NEW.issue_id = '%s'::uuid) EXECUTE FUNCTION %s();`,
+			trg, uuidString(t, f.issueID), fn)); err != nil {
+			t.Fatalf("create trigger: %v", err)
+		}
+		ap := db.Autopilot{AssigneeType: "agent", AssigneeID: f.agents["review-agent"]}
+
+		if _, err := svc.restartChainOnPush(ctx, ap, run, issue); err != nil {
+			t.Fatalf("restartChainOnPush: %v", err)
+		}
+		if cs := issueComments(t, ctx, pool, f.issueID); len(cs) != 1 {
+			t.Fatalf("comments = %d, want 1 — the trigger refused the trace, so the write did not precede it", len(cs))
+		}
+	})
+
+	t.Run("status write refused: error returned, card untouched, ⚠ comment posted by the caller's helper", func(t *testing.T) {
+		f := createPushRestartFixture(t, ctx, pool)
+		svc := pushRestartServices(pool)
+		f.park(t, ctx, pool, "in_review")
+		issue, err := svc.Queries.GetIssue(ctx, f.issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The write is tenant-guarded on workspace_id; a card presented under
+		// the wrong workspace matches no row, which is the cheapest way to
+		// make the one-statement write fail for real.
+		wrong := issue
+		wrong.WorkspaceID = mustUUID(t, "00000000-0000-0000-0000-000000000001")
+		ap := db.Autopilot{AssigneeType: "agent", AssigneeID: f.agents["review-agent"]}
+
+		_, err = svc.restartChainOnPush(ctx, ap, run, wrong)
+		if err == nil {
+			t.Fatal("expected the refused write to surface as an error")
+		}
+		svc.explainFailedRestart(ctx, ap, run, wrong, err)
+		status, assignee := issueState(t, ctx, pool, f.issueID)
+		if status != "in_review" || assignee.Valid {
+			t.Fatalf("card moved despite the refused write: %s/%v", status, assignee)
+		}
+		cs := issueComments(t, ctx, pool, f.issueID)
+		if len(cs) != 1 || !strings.HasPrefix(cs[0].content, "⚠ Head moved to `d5a9163`") || !strings.Contains(cs[0].content, "could not restart the review") {
+			t.Fatalf("comment = %+v", cs)
+		}
+		if strings.Contains(cs[0].content, "mention://") {
+			t.Fatalf("P2 violated: %q", cs[0].content)
 		}
 	})
 }

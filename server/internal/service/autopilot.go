@@ -658,12 +658,13 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 
 		// A push restarts the chain. Every run on this card began on a head
 		// that no longer exists: cancel them (except a fixer mid-run — it is
-		// the one that pushed), hand the card back to the entry agent, and
+		// the one that pushed), take the card back for the entry agent, and
 		// leave the trace. The enqueue below is then the one fresh review.
-		// A card with no assignee (parked) is left exactly as it was — see
-		// push_restart.go and the design it cites.
+		// A card with no assignee (parked, blocked) is taken back too — the
+		// push is a fix attempt. See push_restart.go and the designs it cites.
 		issue, err = s.restartChainOnPush(ctx, ap, *run, existing)
 		if err != nil {
+			s.explainFailedRestart(ctx, ap, *run, existing, err)
 			return fmt.Errorf("restart chain on push: %w", err)
 		}
 	} else {
@@ -770,16 +771,40 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		s.notifyAutopilotSubscribersOnCreate(ctx, ap, issue, leader.ID, templateSubs)
 	}
 
-	// Enqueue agent task via the existing flow. Squad-assigned autopilots
-	// route to the resolved leader as the executing agent (Path A from
-	// MUL-2429); agent-assigned autopilots go through the standard issue
-	// path. Both code paths land in agent_task_queue with agent_id = leader.
-	// A MANUAL trigger (valid actorUserID) is a direct human action: enqueue via the
-	// actor-carrying entry points so attribution resolves direct_human to the
-	// triggering member (originator == accountable == actor, MUL-4302 §4). Schedule /
-	// webhook dispatch has no actor and takes the plain entry points, where the
-	// autopilot-origin issue resolves to rule_owner. The *WithHandoff variants are
-	// the existing actor-carrying enqueue methods; the handoff note is empty here.
+	// Enqueue agent task via the existing flow (enqueueAutopilotIssueTask).
+	// On the attach path a failure here means a push arrived and nothing
+	// will review it: say so on the card before the run fails
+	// (push-to-parked-card design §3.4 — no push fails silently).
+	if err := s.enqueueAutopilotIssueTask(ctx, ap, leader, issue, actorUserID); err != nil {
+		if reusedExisting {
+			s.explainFailedRestart(ctx, ap, *run, issue, err)
+		}
+		return err
+	}
+
+	slog.Info("autopilot dispatched (create_issue)",
+		"autopilot_id", util.UUIDToString(ap.ID),
+		"assignee_type", ap.AssigneeType,
+		"issue_id", util.UUIDToString(issue.ID),
+		"leader_id", util.UUIDToString(leader.ID),
+		"run_id", util.UUIDToString(run.ID),
+	)
+	return nil
+}
+
+// enqueueAutopilotIssueTask is the create_issue enqueue, extracted so the
+// attach path can explain a failure on the card before failing the run.
+// Squad-assigned autopilots route to the resolved leader as the executing
+// agent (Path A from MUL-2429); agent-assigned autopilots go through the
+// standard issue path. Both land in agent_task_queue with agent_id = leader.
+// A MANUAL trigger (valid actorUserID) is a direct human action: enqueue via
+// the actor-carrying entry points so attribution resolves direct_human to the
+// triggering member (originator == accountable == actor, MUL-4302 §4).
+// Schedule / webhook dispatch has no actor and takes the plain entry points,
+// where the autopilot-origin issue resolves to rule_owner. The *WithHandoff
+// variants are the existing actor-carrying enqueue methods; the handoff note
+// is empty here.
+func (s *AutopilotService) enqueueAutopilotIssueTask(ctx context.Context, ap db.Autopilot, leader db.Agent, issue db.Issue, actorUserID pgtype.UUID) error {
 	if ap.AssigneeType == "squad" {
 		// Fail-closed invocation gate: verify the admission principal (manual
 		// clicker, else creator — see autopilotAdmitInvoke) may still invoke the
@@ -792,24 +817,22 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 			if _, err := s.TaskSvc.EnqueueTaskForSquadLeaderWithHandoff(ctx, issue, leader.ID, ap.AssigneeID, "", actorUserID); err != nil {
 				return fmt.Errorf("enqueue squad leader task: %w", err)
 			}
-		} else if _, err := s.TaskSvc.EnqueueTaskForSquadLeader(ctx, issue, leader.ID, ap.AssigneeID, pgtype.UUID{}); err != nil {
+			return nil
+		}
+		if _, err := s.TaskSvc.EnqueueTaskForSquadLeader(ctx, issue, leader.ID, ap.AssigneeID, pgtype.UUID{}); err != nil {
 			return fmt.Errorf("enqueue squad leader task: %w", err)
 		}
-	} else if actorUserID.Valid {
+		return nil
+	}
+	if actorUserID.Valid {
 		if _, err := s.TaskSvc.EnqueueTaskForIssueWithHandoff(ctx, issue, "", actorUserID); err != nil {
 			return fmt.Errorf("enqueue task for issue: %w", err)
 		}
-	} else if _, err := s.TaskSvc.EnqueueTaskForIssue(ctx, issue); err != nil {
+		return nil
+	}
+	if _, err := s.TaskSvc.EnqueueTaskForIssue(ctx, issue); err != nil {
 		return fmt.Errorf("enqueue task for issue: %w", err)
 	}
-
-	slog.Info("autopilot dispatched (create_issue)",
-		"autopilot_id", util.UUIDToString(ap.ID),
-		"assignee_type", ap.AssigneeType,
-		"issue_id", util.UUIDToString(issue.ID),
-		"leader_id", util.UUIDToString(leader.ID),
-		"run_id", util.UUIDToString(run.ID),
-	)
 	return nil
 }
 

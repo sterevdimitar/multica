@@ -195,13 +195,22 @@ func pushRestartComment(headSHA, sender string, cancelled []pushRestartTask, pri
 // Per-task cancellation goes through TaskService.CancelTask, the Stop
 // button's path, so a cancelled run's GitHub job is cancelled too and its
 // step-finalizer never runs: a cancelled run writes nothing. A cancel that
-// fails is logged and skipped — the restart still happens; a failed
-// re-assign is returned, because enqueueing for the wrong agent is worse
-// than not enqueueing. The card is handed back to the autopilot's assignee
-// only for agent-assigned autopilots; a card with no assignee is left
-// exactly as it was.
+// fails is logged and skipped — the restart still happens.
+//
+// The card is then taken back for the entry agent in ONE statement —
+// in_progress + the autopilot's assignee (UpdateIssueStatusAndAssign) —
+// whatever state it was in. That is what lifts a park: a parked card is
+// in_review with no assignee, and both halves have to move together (P1).
+// This is the one automated writer allowed to write in_progress over
+// in_review, because the push it reacts to is a human act on the pull
+// request. A refused write is returned, because enqueueing for a card that
+// did not move is worse than not enqueueing; the caller posts the ⚠ trace
+// (explainFailedRestart) before failing the run.
+//
+// Squad-assigned autopilots are left alone: their enqueue path names the
+// leader explicitly and this pipeline has none.
 func (s *AutopilotService) restartChainOnPush(ctx context.Context, ap db.Autopilot, run db.AutopilotRun, issue db.Issue) (db.Issue, error) {
-	if ap.AssigneeType != "agent" || !ap.AssigneeID.Valid || !issue.AssigneeID.Valid {
+	if ap.AssigneeType != "agent" || !ap.AssigneeID.Valid {
 		return issue, nil
 	}
 	rows, err := s.Queries.ListTasksByIssue(ctx, issue.ID)
@@ -235,24 +244,72 @@ func (s *AutopilotService) restartChainOnPush(ctx context.Context, ap db.Autopil
 		}
 		cancelled = append(cancelled, t)
 	}
-	if issue.AssigneeType.String != "agent" || issue.AssigneeID != ap.AssigneeID {
-		updated, err := s.Queries.UpdateIssueAssignee(ctx, db.UpdateIssueAssigneeParams{
-			ID:           issue.ID,
-			AssigneeType: pgtype.Text{String: "agent", Valid: true},
-			AssigneeID:   ap.AssigneeID,
-		})
-		if err != nil {
-			return issue, fmt.Errorf("hand the card back to the entry agent: %w", err)
-		}
-		slog.Info("push restart: card handed back to the entry agent",
-			"issue_id", util.UUIDToString(issue.ID),
-			"from", util.UUIDToString(issue.AssigneeID), "to", util.UUIDToString(ap.AssigneeID))
-		issue = updated
+
+	prevStatus := issue.Status
+	wasUnassigned := !issue.AssigneeID.Valid
+	updated, err := s.Queries.UpdateIssueStatusAndAssign(ctx, db.UpdateIssueStatusAndAssignParams{
+		ID:           issue.ID,
+		Status:       StatusInProgress,
+		AssigneeType: pgtype.Text{String: "agent", Valid: true},
+		AssigneeID:   ap.AssigneeID,
+		WorkspaceID:  issue.WorkspaceID,
+	})
+	if err != nil {
+		return issue, fmt.Errorf("take the card back for the entry agent: %w", err)
 	}
-	slog.Info("push restart",
+	slog.Info("push restart: card taken back for the entry agent",
 		"issue_id", util.UUIDToString(issue.ID), "head", headSHA, "sender", sender,
+		"prev_status", prevStatus, "was_unassigned", wasUnassigned,
+		"from", util.UUIDToString(issue.AssigneeID), "to", util.UUIDToString(ap.AssigneeID),
 		"cancelled", len(cancelled), "planned", len(cancel))
+	issue = updated
+	s.TaskSvc.broadcastIssueUpdated(issue, prevStatus)
 	s.TaskSvc.createAgentComment(ctx, issue.ID, ap.AssigneeID,
-		pushRestartComment(headSHA, sender, cancelled, issue.Status, false), "comment", pgtype.UUID{}, pgtype.UUID{})
+		pushRestartComment(headSHA, sender, cancelled, prevStatus, wasUnassigned), "comment", pgtype.UUID{}, pgtype.UUID{})
 	return issue, nil
+}
+
+// pushRestartFailedComment renders the trace left when a push attached to a
+// card but the pipeline could not restart the review for it. The cause is
+// internal error text, neutralised anyway (blockedCommentReasonReplacer
+// defuses mention://, backticks and newlines) because every pipeline comment
+// is built to be unable to dispatch anything (P2).
+func pushRestartFailedComment(headSHA, sender string, cause error) string {
+	short := "unknown"
+	if headSHA != "" {
+		short = headSHA
+		if len(short) > 7 {
+			short = short[:7]
+		}
+	}
+	by := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			return r
+		}
+		return -1
+	}, sender)
+	if by == "" {
+		by = "an unknown sender"
+	}
+	why := "unknown error"
+	if cause != nil {
+		why = blockedCommentReasonReplacer.Replace(cause.Error())
+	}
+	return fmt.Sprintf("⚠ Head moved to `%s` (pushed by %s), but the pipeline could not restart the review: %s. Re-assign an agent to this card to review the new head.", short, by, why)
+}
+
+// explainFailedRestart leaves the ⚠ trace when a synchronize attached to a
+// card but the restart could not be carried out — the status write or the
+// enqueue failed. Best-effort and silent on its own failure: the run still
+// fails with its original reason (the caller returns cause after this), and a
+// comment that cannot be posted is logged by createAgentComment. No push
+// fails silently, on either path (push-to-parked-card design §3.4).
+func (s *AutopilotService) explainFailedRestart(ctx context.Context, ap db.Autopilot, run db.AutopilotRun, issue db.Issue, cause error) {
+	if ap.AssigneeType != "agent" || !ap.AssigneeID.Valid {
+		return
+	}
+	headSHA, sender := pullRequestPush(run)
+	s.TaskSvc.createAgentComment(ctx, issue.ID, ap.AssigneeID,
+		pushRestartFailedComment(headSHA, sender, cause), "comment", pgtype.UUID{}, pgtype.UUID{})
 }
