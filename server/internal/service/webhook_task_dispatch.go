@@ -438,10 +438,12 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 }
 
 // MaybeDispatchNextQueuedWebhookTask checks whether the agent has
-// capacity for another webhook task after one just completed or failed.
+// capacity for another webhook task after one just completed, failed or
+// was cancelled.
 // If a queued task exists and the agent's max_concurrent_tasks allows
-// it, the task is dispatched immediately. Called from CompleteTask and
-// FailTask so the queue drains without waiting for the next enqueue.
+// it, the task is dispatched immediately. Called from CompleteTask,
+// FailTask and CancelTaskWithResult so the queue drains without waiting
+// for the next enqueue.
 func (s *TaskService) MaybeDispatchNextQueuedWebhookTask(ctx context.Context, agentID pgtype.UUID) {
 	if os.Getenv("MULTICA_WEBHOOK_RUNTIME") != "1" {
 		return

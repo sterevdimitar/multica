@@ -1783,6 +1783,14 @@ func (s *TaskService) CancelTaskWithResult(ctx context.Context, taskID pgtype.UU
 	s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, task)
 	s.NotifyTaskFinished(task)
 
+	// Drain the webhook queue: a cancel frees capacity exactly as a completion
+	// or a failure does. Without this, a task queued behind the cancelled one
+	// on a capacity-capped agent has nothing to wake it — the agent sits idle
+	// and the row waits for the queued-TTL sweeper to expire it (card 239,
+	// 2026-09-14: a push restart cancelled the run ahead of a queued
+	// conflict-agent summon).
+	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
+
 	return &CancelTaskResult{
 		Task:                 task,
 		CancelledChatMessage: cancelledChatMessage,

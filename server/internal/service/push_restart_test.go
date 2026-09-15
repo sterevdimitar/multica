@@ -17,11 +17,12 @@ import (
 // (push_restart_db_test.go) only checks that the plan is carried out.
 
 func TestPushExemptAgents(t *testing.T) {
-	t.Run("unset defaults to the pipeline's fixer", func(t *testing.T) {
+	t.Run("unset defaults to the two agents that push: fixer and conflict-agent", func(t *testing.T) {
 		t.Setenv("MULTICA_PUSH_EXEMPT_AGENTS", "placeholder")
 		os.Unsetenv("MULTICA_PUSH_EXEMPT_AGENTS")
-		if got := pushExemptAgents(); !reflect.DeepEqual(got, map[string]bool{"fixer": true}) {
-			t.Fatalf("unset: got %v, want {fixer}", got)
+		want := map[string]bool{"fixer": true, "conflict-agent": true}
+		if got := pushExemptAgents(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("unset: got %v, want %v", got, want)
 		}
 	})
 	t.Run("empty string exempts nothing", func(t *testing.T) {
@@ -84,6 +85,12 @@ func TestPlanPushRestart(t *testing.T) {
 		{"judge running",
 			[]pushRestartTask{prTask("readiness-agent", "running")}, fixerOnly,
 			[]string{"readiness-agent:running"}},
+		// Card 239, 2026-09-14: the conflict-agent's own force-push of the
+		// resolved branch cancelled it two seconds later, so its hunk report
+		// never posted. Under the default exemption it is kept like the fixer.
+		{"conflict-agent running (its own push) under the default exemption",
+			[]pushRestartTask{prTask("conflict-agent", "running")}, pushExemptAgents(),
+			[]string{}},
 		{"nothing active",
 			[]pushRestartTask{prTask("review-agent", "completed"), prTask("fixer", "failed"), prTask("fixer", "cancelled")}, fixerOnly,
 			[]string{}},
