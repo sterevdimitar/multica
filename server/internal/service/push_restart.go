@@ -30,7 +30,11 @@ import (
 // commit up — so the exemption is by agent NAME and task state: a task that
 // is running or dispatched and belongs to an agent named in
 // MULTICA_PUSH_EXEMPT_AGENTS is never cancelled by a push. The default names
-// the pipeline's fixer, the only agent that writes to the branch.
+// the two pipeline agents that write to the branch: the fixer and the
+// conflict-agent. The conflict-agent was missing until 2026-09-15 — on card
+// 239 its own force-push of the resolved branch cancelled it two seconds
+// later, so the hunk report the readiness judge agent depends on was never
+// posted.
 //
 // Design: dev-command-center
 // docs/superpowers/specs/2026-09-13-outside-push-restarts-the-chain-design.md.
@@ -58,14 +62,14 @@ var pushActiveStatuses = map[string]bool{
 
 // pushExemptAgents reads MULTICA_PUSH_EXEMPT_AGENTS: a comma-separated list
 // of agent names whose running or dispatched task a push never cancels.
-// Unset means the pipeline's fixer; an explicitly empty value exempts
-// nothing. The name is load-bearing the way `readiness-agent` is on the
-// runner: renaming the fixer in pipeline/agents.yaml without updating this
-// setting makes its own push cancel it mid-run.
+// Unset means the pipeline's fixer and conflict-agent; an explicitly empty
+// value exempts nothing. The names are load-bearing the way
+// `readiness-agent` is on the runner: renaming either in pipeline/agents.yaml
+// without updating this setting makes its own push cancel it mid-run.
 func pushExemptAgents() map[string]bool {
 	raw, set := os.LookupEnv("MULTICA_PUSH_EXEMPT_AGENTS")
 	if !set {
-		return map[string]bool{"fixer": true}
+		return map[string]bool{"fixer": true, "conflict-agent": true}
 	}
 	out := map[string]bool{}
 	for _, name := range strings.Split(raw, ",") {
