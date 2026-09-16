@@ -285,3 +285,29 @@ func TestUpdateIssueStatus_EmptyColumnLandsAtMinusOne(t *testing.T) {
 		t.Errorf("position into an empty column = %v, want -1 (COALESCE(MIN, 0) - 1)", got)
 	}
 }
+
+// The archive sweeper's write (ArchiveIssuesIfStatus) is a status writer too:
+// a card it moves to `archived` lands at the top of that column.
+func TestArchiveIssuesIfStatus_LandsAtTopOfColumn(t *testing.T) {
+	requireDB(t)
+	ws := newIsolatedWorkspace(t)
+	seedIssue(t, ws, "archived", -5, 1)
+	seedIssue(t, ws, "archived", -3, 2)
+	card := seedIssue(t, ws, "done", 7, 3)
+
+	rows, err := testHandler.Queries.ArchiveIssuesIfStatus(context.Background(), db.ArchiveIssuesIfStatusParams{
+		Ids: []pgtype.UUID{card.ID}, CurrentStatus: "done",
+	})
+	if err != nil {
+		t.Fatalf("ArchiveIssuesIfStatus: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Status != "archived" {
+		t.Fatalf("archived rows = %+v, want the one card at archived", rows)
+	}
+	if got := positionOf(t, card.ID); got != -6 {
+		t.Errorf("written position = %v, want -6 (top of archived: MIN -5, minus 1)", got)
+	}
+	if rows[0].Position != -6 {
+		t.Errorf("RETURNING position = %v, want -6", rows[0].Position)
+	}
+}

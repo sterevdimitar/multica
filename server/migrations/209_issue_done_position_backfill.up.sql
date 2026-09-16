@@ -1,4 +1,4 @@
--- 208_issue_done_position_backfill.up.sql
+-- 209_issue_done_position_backfill.up.sql
 --
 -- One-off re-rank of the `done` column, per workspace, newest first. Until
 -- the status-writing queries learned to place a moved card at the top of its

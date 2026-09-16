@@ -14,8 +14,19 @@ import (
 const archiveIssuesIfStatus = `-- name: ArchiveIssuesIfStatus :many
 UPDATE issue SET
     status = 'archived',
+    -- Top-of-column on status change; see UpdateIssue. A whole sweep batch
+    -- lands on one MIN-1 value (every row sees the pre-statement snapshot);
+    -- the board breaks the tie on its secondary sort key, which is fine for
+    -- cards archived in the same instant.
+    position = CASE
+        WHEN status IS DISTINCT FROM 'archived' THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = 'archived')
+        ELSE position
+    END,
     updated_at = now()
-WHERE id = ANY($1::uuid[]) AND status = $2
+WHERE issue.id = ANY($1::uuid[]) AND issue.status = $2
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 

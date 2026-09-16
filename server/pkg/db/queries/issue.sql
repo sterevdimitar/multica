@@ -297,8 +297,19 @@ WHERE status IN ('done', 'cancelled')
 -- race, not an error.
 UPDATE issue SET
     status = 'archived',
+    -- Top-of-column on status change; see UpdateIssue. A whole sweep batch
+    -- lands on one MIN-1 value (every row sees the pre-statement snapshot);
+    -- the board breaks the tie on its secondary sort key, which is fine for
+    -- cards archived in the same instant.
+    position = CASE
+        WHEN status IS DISTINCT FROM 'archived' THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = 'archived')
+        ELSE position
+    END,
     updated_at = now()
-WHERE id = ANY(sqlc.arg(ids)::uuid[]) AND status = sqlc.arg(current_status)
+WHERE issue.id = ANY(sqlc.arg(ids)::uuid[]) AND issue.status = sqlc.arg(current_status)
 RETURNING *;
 
 -- name: CreateIssueWithOrigin :one
