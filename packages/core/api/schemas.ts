@@ -178,6 +178,12 @@ export interface AppConfigResponse {
   analytics_environment?: string;
   daemon_server_url?: string;
   daemon_app_url?: string;
+  // Webhook-runtime bring-up values for the "Add a computer" dialog.
+  // Older servers omit them; unset on the operator's side is "".
+  webhook_runtime_dispatch_url?: string;
+  webhook_runtime_event_type?: string;
+  webhook_runtime_runner_repo?: string;
+  webhook_runtime_runner_path?: string;
   workspace_creation_disabled?: boolean;
   feature_flags?: Record<string, boolean>;
   server_version?: string;
@@ -328,6 +334,10 @@ export const AppConfigSchema = z.object({
   analytics_environment: OptionalStringSchema,
   daemon_server_url: OptionalStringSchema,
   daemon_app_url: OptionalStringSchema,
+  webhook_runtime_dispatch_url: OptionalStringSchema,
+  webhook_runtime_event_type: OptionalStringSchema,
+  webhook_runtime_runner_repo: OptionalStringSchema,
+  webhook_runtime_runner_path: OptionalStringSchema,
   workspace_creation_disabled: BooleanWithDefaultSchema(false).optional(),
   feature_flags: FeatureFlagsSchema,
   server_version: OptionalStringSchema,
@@ -340,6 +350,10 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   google_client_id: "",
   daemon_server_url: "",
   daemon_app_url: "",
+  webhook_runtime_dispatch_url: "",
+  webhook_runtime_event_type: "",
+  webhook_runtime_runner_repo: "",
+  webhook_runtime_runner_path: "",
   workspace_creation_disabled: false,
   feature_flags: {},
 };

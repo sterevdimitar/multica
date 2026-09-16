@@ -67,6 +67,12 @@ export function AuthInitializer({
           daemonServerUrl: cfg.daemon_server_url,
           daemonAppUrl: cfg.daemon_app_url,
         });
+        configStore.getState().setWebhookRuntimeConfig({
+          webhookRuntimeDispatchUrl: cfg.webhook_runtime_dispatch_url,
+          webhookRuntimeEventType: cfg.webhook_runtime_event_type,
+          webhookRuntimeRunnerRepo: cfg.webhook_runtime_runner_repo,
+          webhookRuntimeRunnerPath: cfg.webhook_runtime_runner_path,
+        });
         configStore.getState().setFeatureFlags(cfg.feature_flags);
         configStore.getState().setServerVersion(cfg.server_version);
         if (cfg.posthog_key) {

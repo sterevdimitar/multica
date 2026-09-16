@@ -689,6 +689,34 @@ describe("AppConfigSchema cdn_signed drift", () => {
     expect(parsed.feature_flags).toEqual({});
   });
 
+  it("leaves the webhook-runtime setup values undefined on servers without them", () => {
+    // Same contract as daemon_server_url: absent stays undefined here and
+    // configStore.setWebhookRuntimeConfig turns it into "".
+    const parsed = AppConfigSchema.parse({ cdn_domain: "", allow_signup: true });
+    expect(parsed.webhook_runtime_dispatch_url).toBeUndefined();
+    expect(parsed.webhook_runtime_event_type).toBeUndefined();
+    expect(parsed.webhook_runtime_runner_repo).toBeUndefined();
+    expect(parsed.webhook_runtime_runner_path).toBeUndefined();
+  });
+
+  it("drops a malformed webhook-runtime setup value instead of failing the config", () => {
+    const parsed = AppConfigSchema.parse({ webhook_runtime_dispatch_url: 42 });
+    expect(parsed.webhook_runtime_dispatch_url).toBeUndefined();
+  });
+
+  it("keeps the webhook-runtime setup values a configured server sends", () => {
+    const parsed = AppConfigSchema.parse({
+      webhook_runtime_dispatch_url: "http://t:8090/v1/dispatch",
+      webhook_runtime_event_type: "multica-task",
+      webhook_runtime_runner_repo: "acme/pipeline",
+      webhook_runtime_runner_path: "deployment/local-runner",
+    });
+    expect(parsed.webhook_runtime_dispatch_url).toBe("http://t:8090/v1/dispatch");
+    expect(parsed.webhook_runtime_event_type).toBe("multica-task");
+    expect(parsed.webhook_runtime_runner_repo).toBe("acme/pipeline");
+    expect(parsed.webhook_runtime_runner_path).toBe("deployment/local-runner");
+  });
+
   it("parses server_version and leaves it undefined when the server omits it", () => {
     expect(AppConfigSchema.parse({ server_version: "1.2.3" }).server_version).toBe("1.2.3");
     expect(AppConfigSchema.parse({}).server_version).toBeUndefined();

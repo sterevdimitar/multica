@@ -11,6 +11,13 @@ interface ConfigState {
   googleClientId: string;
   daemonServerUrl: string;
   daemonAppUrl: string;
+  // Webhook-runtime bring-up values the "Add a computer" dialog renders
+  // into commands. "" means the operator has not set the variable and the
+  // dialog shows a placeholder instead.
+  webhookRuntimeDispatchUrl: string;
+  webhookRuntimeEventType: string;
+  webhookRuntimeRunnerRepo: string;
+  webhookRuntimeRunnerPath: string;
   // Self-host gate (#3433): when true, every "Create workspace" affordance
   // must be hidden. Defaults to false so unknown / older servers behave like
   // the managed-cloud case.
@@ -30,6 +37,12 @@ interface ConfigState {
     daemonServerUrl?: string;
     daemonAppUrl?: string;
   }) => void;
+  setWebhookRuntimeConfig: (config: {
+    webhookRuntimeDispatchUrl?: string;
+    webhookRuntimeEventType?: string;
+    webhookRuntimeRunnerRepo?: string;
+    webhookRuntimeRunnerPath?: string;
+  }) => void;
   setFeatureFlags: (flags?: Record<string, boolean>) => void;
   setServerVersion: (version?: string) => void;
 }
@@ -41,6 +54,10 @@ export const configStore = createStore<ConfigState>((set) => ({
   googleClientId: "",
   daemonServerUrl: "",
   daemonAppUrl: "",
+  webhookRuntimeDispatchUrl: "",
+  webhookRuntimeEventType: "",
+  webhookRuntimeRunnerRepo: "",
+  webhookRuntimeRunnerPath: "",
   workspaceCreationDisabled: false,
   featureFlags: {},
   serverVersion: "",
@@ -49,6 +66,18 @@ export const configStore = createStore<ConfigState>((set) => ({
     set({ allowSignup, googleClientId, workspaceCreationDisabled }),
   setDaemonConfig: ({ daemonServerUrl = "", daemonAppUrl = "" }) =>
     set({ daemonServerUrl, daemonAppUrl }),
+  setWebhookRuntimeConfig: ({
+    webhookRuntimeDispatchUrl = "",
+    webhookRuntimeEventType = "",
+    webhookRuntimeRunnerRepo = "",
+    webhookRuntimeRunnerPath = "",
+  }) =>
+    set({
+      webhookRuntimeDispatchUrl,
+      webhookRuntimeEventType,
+      webhookRuntimeRunnerRepo,
+      webhookRuntimeRunnerPath,
+    }),
   setFeatureFlags: (flags = {}) => set({ featureFlags: { ...flags } }),
   setServerVersion: (version = "") => set({ serverVersion: version }),
 }));
