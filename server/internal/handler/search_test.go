@@ -35,9 +35,11 @@ func TestBuildSearchQuery_SingleTerm(t *testing.T) {
 		t.Error("exact title rank should compare LOWER(i.title) = $1 directly")
 	}
 
-	// Should exclude closed issues by default.
-	if !strings.Contains(query, "NOT IN ('done', 'cancelled')") {
-		t.Error("query should exclude done/cancelled when includeClosed=false")
+	// Should exclude closed issues by default — every terminal status,
+	// archived included (it is finished work put away; a search that
+	// surfaced it by default would undo the archive).
+	if !strings.Contains(query, "NOT IN ('done', 'cancelled', 'archived')") {
+		t.Error("query should exclude done/cancelled/archived when includeClosed=false")
 	}
 }
 
