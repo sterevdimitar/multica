@@ -209,6 +209,29 @@ WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY(sqlc.arg(
   )
 RETURNING *;
 
+-- name: ListStaleTerminalIssues :many
+-- The archive sweeper's read (service.ArchiveStaleTerminalIssues): every
+-- card, across workspaces, that has sat in a terminal status for longer
+-- than older_than. updated_at is the clock: comments live in their own
+-- table and do not bump it, so on a terminal card it is the moment the
+-- status was written; an edit resets it, which reads as "touched, keep it
+-- visible". Served by idx_issue_status on (workspace_id, status).
+SELECT * FROM issue
+WHERE status IN ('done', 'cancelled')
+  AND updated_at < now() - sqlc.arg(older_than)::interval;
+
+-- name: ArchiveIssuesIfStatus :many
+-- The sweeper's write, one call per previous status. The status guard is
+-- what closes the race with a human dragging a card out between the read
+-- above and this write: such a card matches no row here, so it is neither
+-- archived nor broadcast with a stale prev_status. Rows not matched are the
+-- race, not an error.
+UPDATE issue SET
+    status = 'archived',
+    updated_at = now()
+WHERE id = ANY(sqlc.arg(ids)::uuid[]) AND status = sqlc.arg(current_status)
+RETURNING *;
+
 -- name: CreateIssueWithOrigin :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
@@ -226,7 +249,7 @@ SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0));
 -- name: FindActiveDuplicateIssue :one
 SELECT * FROM issue
 WHERE workspace_id = $1
-  AND status NOT IN ('done', 'cancelled')
+  AND status NOT IN ('done', 'cancelled', 'archived')
   AND project_id IS NOT DISTINCT FROM sqlc.arg('project_id')::uuid
   AND parent_issue_id IS NOT DISTINCT FROM sqlc.arg('parent_issue_id')::uuid
   AND lower(btrim(regexp_replace(title, '[[:space:]]+', ' ', 'g'))) = sqlc.arg('normalized_title')
@@ -236,7 +259,7 @@ LIMIT 1;
 -- name: FindRecentAutopilotDuplicateIssue :one
 SELECT i.* FROM issue i
 WHERE i.workspace_id = $1
-  AND i.status NOT IN ('done', 'cancelled')
+  AND i.status NOT IN ('done', 'cancelled', 'archived')
   AND i.origin_type = 'autopilot'
   AND i.origin_id = $2
   AND i.project_id IS NOT DISTINCT FROM sqlc.arg('project_id')::uuid
@@ -258,7 +281,7 @@ WHERE workspace_id = $1
   AND origin_type = 'autopilot'
   AND origin_id = $2
   AND metadata ->> 'pull_request' = sqlc.arg('pull_request_slug')::text
-  AND status NOT IN ('done', 'cancelled')
+  AND status NOT IN ('done', 'cancelled', 'archived')
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -278,7 +301,7 @@ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage, i.properties
 FROM issue i
 WHERE i.workspace_id = $1
-  AND i.status NOT IN ('done', 'cancelled')
+  AND i.status NOT IN ('done', 'cancelled', 'archived')
   AND (sqlc.narg('priority')::text IS NULL OR i.priority = sqlc.narg('priority'))
   AND (sqlc.narg('assignee_id')::uuid IS NULL OR i.assignee_id = sqlc.narg('assignee_id'))
   AND (sqlc.narg('assignee_ids')::uuid[] IS NULL OR i.assignee_id = ANY(sqlc.narg('assignee_ids')::uuid[]))
@@ -434,7 +457,7 @@ GROUP BY assignee_type, assignee_id;
 -- name: ChildIssueProgress :many
 SELECT parent_issue_id,
        COUNT(*)::bigint AS total,
-       COUNT(*) FILTER (WHERE status IN ('done', 'cancelled'))::bigint AS done
+       COUNT(*) FILTER (WHERE status IN ('done', 'cancelled', 'archived'))::bigint AS done
 FROM issue
 WHERE workspace_id = $1
   AND parent_issue_id IS NOT NULL

@@ -11,10 +11,75 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const archiveIssuesIfStatus = `-- name: ArchiveIssuesIfStatus :many
+UPDATE issue SET
+    status = 'archived',
+    updated_at = now()
+WHERE id = ANY($1::uuid[]) AND status = $2
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
+`
+
+type ArchiveIssuesIfStatusParams struct {
+	Ids           []pgtype.UUID `json:"ids"`
+	CurrentStatus string        `json:"current_status"`
+}
+
+// The sweeper's write, one call per previous status. The status guard is
+// what closes the race with a human dragging a card out between the read
+// above and this write: such a card matches no row here, so it is neither
+// archived nor broadcast with a stale prev_status. Rows not matched are the
+// race, not an error.
+func (q *Queries) ArchiveIssuesIfStatus(ctx context.Context, arg ArchiveIssuesIfStatusParams) ([]Issue, error) {
+	rows, err := q.db.Query(ctx, archiveIssuesIfStatus, arg.Ids, arg.CurrentStatus)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Issue{}
+	for rows.Next() {
+		var i Issue
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+			&i.OriginType,
+			&i.OriginID,
+			&i.FirstExecutedAt,
+			&i.StartDate,
+			&i.Metadata,
+			&i.Stage,
+			&i.Properties,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const childIssueProgress = `-- name: ChildIssueProgress :many
 SELECT parent_issue_id,
        COUNT(*)::bigint AS total,
-       COUNT(*) FILTER (WHERE status IN ('done', 'cancelled'))::bigint AS done
+       COUNT(*) FILTER (WHERE status IN ('done', 'cancelled', 'archived'))::bigint AS done
 FROM issue
 WHERE workspace_id = $1
   AND parent_issue_id IS NOT NULL
@@ -412,7 +477,7 @@ func (q *Queries) DeleteIssueMetadataKey(ctx context.Context, arg DeleteIssueMet
 const findActiveDuplicateIssue = `-- name: FindActiveDuplicateIssue :one
 SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties FROM issue
 WHERE workspace_id = $1
-  AND status NOT IN ('done', 'cancelled')
+  AND status NOT IN ('done', 'cancelled', 'archived')
   AND project_id IS NOT DISTINCT FROM $2::uuid
   AND parent_issue_id IS NOT DISTINCT FROM $3::uuid
   AND lower(btrim(regexp_replace(title, '[[:space:]]+', ' ', 'g'))) = $4
@@ -472,7 +537,7 @@ WHERE workspace_id = $1
   AND origin_type = 'autopilot'
   AND origin_id = $2
   AND metadata ->> 'pull_request' = $3::text
-  AND status NOT IN ('done', 'cancelled')
+  AND status NOT IN ('done', 'cancelled', 'archived')
 ORDER BY created_at DESC
 LIMIT 1
 `
@@ -520,7 +585,7 @@ func (q *Queries) FindOpenAutopilotIssueForPullRequest(ctx context.Context, arg 
 const findRecentAutopilotDuplicateIssue = `-- name: FindRecentAutopilotDuplicateIssue :one
 SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata, i.stage, i.properties FROM issue i
 WHERE i.workspace_id = $1
-  AND i.status NOT IN ('done', 'cancelled')
+  AND i.status NOT IN ('done', 'cancelled', 'archived')
   AND i.origin_type = 'autopilot'
   AND i.origin_id = $2
   AND i.project_id IS NOT DISTINCT FROM $3::uuid
@@ -1111,7 +1176,7 @@ SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.metadata, i.stage, i.properties
 FROM issue i
 WHERE i.workspace_id = $1
-  AND i.status NOT IN ('done', 'cancelled')
+  AND i.status NOT IN ('done', 'cancelled', 'archived')
   AND ($2::text IS NULL OR i.priority = $2)
   AND ($3::uuid IS NULL OR i.assignee_id = $3)
   AND ($4::uuid[] IS NULL OR i.assignee_id = ANY($4::uuid[]))
@@ -1246,6 +1311,65 @@ func (q *Queries) ListOpenIssues(ctx context.Context, arg ListOpenIssuesParams) 
 			&i.UpdatedAt,
 			&i.Number,
 			&i.ProjectID,
+			&i.Metadata,
+			&i.Stage,
+			&i.Properties,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStaleTerminalIssues = `-- name: ListStaleTerminalIssues :many
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties FROM issue
+WHERE status IN ('done', 'cancelled')
+  AND updated_at < now() - $1::interval
+`
+
+// The archive sweeper's read (service.ArchiveStaleTerminalIssues): every
+// card, across workspaces, that has sat in a terminal status for longer
+// than older_than. updated_at is the clock: comments live in their own
+// table and do not bump it, so on a terminal card it is the moment the
+// status was written; an edit resets it, which reads as "touched, keep it
+// visible". Served by idx_issue_status on (workspace_id, status).
+func (q *Queries) ListStaleTerminalIssues(ctx context.Context, olderThan pgtype.Interval) ([]Issue, error) {
+	rows, err := q.db.Query(ctx, listStaleTerminalIssues, olderThan)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Issue{}
+	for rows.Next() {
+		var i Issue
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+			&i.OriginType,
+			&i.OriginID,
+			&i.FirstExecutedAt,
+			&i.StartDate,
 			&i.Metadata,
 			&i.Stage,
 			&i.Properties,
