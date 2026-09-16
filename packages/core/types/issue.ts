@@ -8,7 +8,11 @@ export type IssueStatus =
   | "in_review"
   | "done"
   | "blocked"
-  | "cancelled";
+  | "cancelled"
+  // Terminal and inert: finished work put out of the way. Hidden from the
+  // board by default; entered by a human or by the server's archive sweeper
+  // (ISSUE_ARCHIVE_AFTER); nothing dispatches on it; only a human moves it out.
+  | "archived";
 
 export type IssuePriority = "urgent" | "high" | "medium" | "low" | "none";
 

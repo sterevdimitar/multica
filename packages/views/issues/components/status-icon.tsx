@@ -139,6 +139,22 @@ function CancelledIcon() {
   );
 }
 
+/** Outer ring + a small box/tray glyph: put away. */
+function ArchivedIcon() {
+  return (
+    <ProgressCircle progress={0}>
+      <path
+        d="M4.5 5.5 H9.5 M5 5.5 V9 A0.5 0.5 0 0 0 5.5 9.5 H8.5 A0.5 0.5 0 0 0 9 9 V5.5 M6.25 7.25 H7.75"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </ProgressCircle>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Renderer map
 // ---------------------------------------------------------------------------
@@ -151,6 +167,7 @@ const STATUS_RENDERERS: Record<IssueStatus, () => React.ReactNode> = {
   done: DoneIcon,
   blocked: BlockedIcon,
   cancelled: CancelledIcon,
+  archived: ArchivedIcon,
 };
 
 // ---------------------------------------------------------------------------

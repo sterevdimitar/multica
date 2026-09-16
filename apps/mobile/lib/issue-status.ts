@@ -12,7 +12,13 @@
  */
 import type { IssuePriority, IssueStatus } from "@multica/core/types";
 
-/** Statuses surfaced in list/board views (matches web — `cancelled` excluded). */
+/**
+ * Statuses surfaced in list/board views. Mirrors web's default view
+ * (DEFAULT_VISIBLE_STATUSES in packages/core/issues/config/status.ts, which
+ * hides `archived`); mobile additionally keeps `cancelled` out of its board
+ * lists. Both terminal statuses stay reachable through the picker and the
+ * filter, which append them below.
+ */
 export const BOARD_STATUSES: IssueStatus[] = [
   "backlog",
   "todo",
@@ -30,6 +36,7 @@ export const STATUS_LABEL: Record<IssueStatus, string> = {
   done: "Done",
   blocked: "Blocked",
   cancelled: "Cancelled",
+  archived: "Archived",
 };
 
 export const PRIORITY_LABEL: Record<IssuePriority, string> = {

@@ -1,6 +1,6 @@
 /**
  * Pure picker body for issue status — single-select over BOARD_STATUSES +
- * cancelled. No shell, no modal — the caller (a formSheet route screen, or
+ * cancelled + archived. No shell, no modal — the caller (a formSheet route screen, or
  * any embedding surface) renders it inside whatever container it needs.
  *
  * Split from the old `status-picker-sheet.tsx` so the same row UI can serve
@@ -17,7 +17,7 @@ import { StatusIcon } from "@/components/ui/status-icon";
 import { BOARD_STATUSES, STATUS_LABEL } from "@/lib/issue-status";
 import { THEME } from "@/lib/theme";
 
-const ALL_STATUSES: IssueStatus[] = [...BOARD_STATUSES, "cancelled"];
+const ALL_STATUSES: IssueStatus[] = [...BOARD_STATUSES, "cancelled", "archived"];
 
 interface Props {
   value: IssueStatus;

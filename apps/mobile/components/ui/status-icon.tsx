@@ -30,6 +30,7 @@ const STATUS_COLOR: Record<IssueStatus, string> = {
   done: "#3b82f6", // info
   blocked: "#dc2626", // destructive
   cancelled: "#71717a",
+  archived: "#71717a",
 };
 
 function piePath(progress: number): string {
@@ -127,6 +128,21 @@ function CancelledX({ color }: { color: string }) {
   );
 }
 
+// Mirrors ArchivedIcon in packages/views/issues/components/status-icon.tsx:
+// an empty ring with a small box/tray glyph — put away.
+function ArchivedBox({ color }: { color: string }) {
+  return (
+    <Path
+      d="M4.5 5.5 H9.5 M5 5.5 V9 A0.5 0.5 0 0 0 5.5 9.5 H8.5 A0.5 0.5 0 0 0 9 9 V5.5 M6.25 7.25 H7.75"
+      fill="none"
+      stroke={color}
+      strokeWidth={1.2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  );
+}
+
 export function StatusIcon({
   status,
   size = 16,
@@ -152,6 +168,10 @@ export function StatusIcon({
       ) : status === "blocked" ? (
         <ProgressCircle progress={0} color={color}>
           <BlockedSlash color={color} />
+        </ProgressCircle>
+      ) : status === "archived" ? (
+        <ProgressCircle progress={0} color={color}>
+          <ArchivedBox color={color} />
         </ProgressCircle>
       ) : (
         <ProgressCircle progress={0} color={color}>

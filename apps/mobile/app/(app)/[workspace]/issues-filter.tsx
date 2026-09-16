@@ -20,7 +20,7 @@ import { useMyIssuesViewStore } from "@/data/stores/my-issues-view-store";
 import { BOARD_STATUSES, STATUS_LABEL } from "@/lib/issue-status";
 import { cn } from "@/lib/utils";
 
-const ALL_STATUSES: IssueStatus[] = [...BOARD_STATUSES, "cancelled"];
+const ALL_STATUSES: IssueStatus[] = [...BOARD_STATUSES, "cancelled", "archived"];
 
 // Mirrors PRIORITY_ORDER in packages/core/issues/config/priority.ts.
 const PRIORITY_ORDER: IssuePriority[] = [

@@ -5,7 +5,7 @@ import { create } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { IssueStatus, IssuePriority } from "../../types";
-import { ALL_STATUSES } from "../config";
+import { DEFAULT_VISIBLE_STATUSES } from "../config";
 import { createWorkspaceAwareStorage, registerForWorkspaceRehydration } from "../../platform/workspace-storage";
 import { defaultStorage } from "../../platform/storage";
 
@@ -274,9 +274,11 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
     set((state) => ({ agentRunningFilter: !state.agentRunningFilter })),
   hideStatus: (status) =>
     set((state) => {
-      // If no filter active, activate filter with all EXCEPT this one
+      // No filter active means the default view (DEFAULT_VISIBLE_STATUSES,
+      // which already omits `archived`): activate a filter with all of
+      // those EXCEPT this one.
       if (state.statusFilters.length === 0) {
-        return { statusFilters: ALL_STATUSES.filter((s) => s !== status) };
+        return { statusFilters: DEFAULT_VISIBLE_STATUSES.filter((s) => s !== status) };
       }
       return {
         statusFilters: state.statusFilters.filter((s) => s !== status),
@@ -284,7 +286,12 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
     }),
   showStatus: (status) =>
     set((state) => {
-      if (state.statusFilters.length === 0) return state;
+      // Showing a status the default view already shows is a no-op; showing
+      // one it hides (`archived`) pins the default view plus that status.
+      if (state.statusFilters.length === 0) {
+        if (DEFAULT_VISIBLE_STATUSES.includes(status)) return state;
+        return { statusFilters: [...DEFAULT_VISIBLE_STATUSES, status] };
+      }
       if (state.statusFilters.includes(status)) return state;
       return { statusFilters: [...state.statusFilters, status] };
     }),
