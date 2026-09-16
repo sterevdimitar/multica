@@ -1493,6 +1493,13 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleControlVerb(ctx context.Context, issue db.Issue, comment db.Comment, authorType, authorID string, verb service.Verb, reason string) {
 	switch verb {
 	case service.VerbPark:
+		// /park is a status write (in_review + unassign) and would silently
+		// un-archive a card; only a human moving the card out of Archived
+		// may do that. Ack instead of parking, and touch nothing.
+		if issue.Status == service.StatusArchived {
+			h.postControlVerbAck(ctx, issue, authorType, authorID, archivedParkAckBody())
+			return
+		}
 		h.parkIssueForComment(ctx, issue, comment, authorType, authorID, reason)
 	case service.VerbResume:
 		// Lifting a hold is what the ABSENCE of a hold means: nothing is
@@ -1552,6 +1559,16 @@ func parkAckBody(reason string) string {
 // begins with "/" even though it names verbs like /park mid-sentence.
 // ParseVerb discards the rest of an unknown verb's comment, so there is no
 // user-controlled text to neutralise here.
+// archivedParkAckBody is the reply to /park on an archived card. Same
+// invariants as parkAckBody: never starts with "/" (a leading slash is a
+// control verb to this pipeline) and never embeds a mention:// link (the
+// ack must not itself dispatch an agent onto the card it is refusing to
+// touch). Pinned by TestArchivedParkAckBodyInvariants.
+func archivedParkAckBody() string {
+	return "This card is archived, so /park did nothing: an archived card is out of play and only a human moves it out. " +
+		"Move it out of Archived first (drag it to a column, or set its status), then /park it."
+}
+
 func unknownVerbAckBody() string {
 	return "That looked like a control verb, but it is not one I know. The verbs are /park (stop the chain and put this card in front of you), /resume (lift the hold), and /note (leave context without triggering a run).\n\n" +
 		"Nothing ran. Re-comment with one of those, or comment normally to instruct the assigned agent."
@@ -2169,6 +2186,15 @@ func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issu
 	// certify the daemon.go guard as load-bearing when it no longer is.
 	// isNoteComment's presence here predates this task and is
 	// left as-is.
+	//
+	// An archived card is inert for comments too: no @mention, no member
+	// comment falling back to the assignee, no replay on completion. This
+	// is the one guard every caller above shares, so submit and preview
+	// cannot drift — and it is FIRST, ahead of mention resolution and the
+	// assignee lookup, so keeping the assignee on archive stays safe.
+	if issue.Status == service.StatusArchived {
+		return nil, nil
+	}
 	if isNoteComment(content) {
 		return nil, nil
 	}

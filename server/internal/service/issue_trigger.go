@@ -88,6 +88,15 @@ func allowAllAgents(db.Agent) bool { return true }
 //     same unique index, so the assignee still ends up with one pending run.
 func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput, probe IssueTriggerProbe) (IssueRunTrigger, bool) {
 	issue := in.Issue
+	// An archived card is inert: no write starts a run on it — not a create,
+	// not an assignment, not a status change landing there. FIRST, before
+	// the assignee is even looked at: the card keeps its assignee on archive
+	// and this ordering is what makes that safe. (Leaving archived for an
+	// active status does not dispatch either, but for the ordinary reason:
+	// the status source below fires only on leaving backlog.)
+	if issue.Status == StatusArchived {
+		return IssueRunTrigger{}, false
+	}
 	if !issue.AssigneeType.Valid || !issue.AssigneeID.Valid {
 		return IssueRunTrigger{}, false
 	}
@@ -105,7 +114,7 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		}
 		source = RunSourceAssign
 	case in.StatusChanged && in.PrevStatus == "backlog" &&
-		issue.Status != "done" && issue.Status != "cancelled":
+		issue.Status != "done" && issue.Status != "cancelled" && issue.Status != StatusArchived:
 		if probe.IsSelfLoop != nil && probe.IsSelfLoop() {
 			return IssueRunTrigger{}, false
 		}
