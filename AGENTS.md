@@ -45,12 +45,12 @@ Go backend + monorepo frontend (pnpm workspaces + Turborepo) with shared package
 
 This is a **fork**, not the upstream repository. When work here is done, **commit and push it directly — do not open a pull request.** Push to the branch the work belongs on; for the webhook-runtime line that is `feature/webhook-runtime-v044`, which is the branch the deployed `backend:fork-webhook` image is built from.
 
-Pull requests are the convention in `dev-command-center`, not here. A fork PR adds a review surface nobody reads and delays the only step that actually ships a change, which is rebuilding the image and redeploying dev then prod by hand.
+Pull requests are the convention in `dev-command-center`, not here. A fork PR adds a review surface nobody reads and delays the only step that actually ships a change, which is rebuilding the image and deploying it to production by hand (`dev-command-center/deployment/DEPLOYMENT.md` §"Pushing a new backend image"). There is no dev environment since 2026-09-16: a change that carries a migration is rehearsed against the WSL Postgres on port `5439` first, and the image then goes straight to the VM behind a rollback tag.
 
 Two things that follow from pushing straight to a shared deploy branch:
 
 - **Re-check the base immediately before pushing.** It moves. Run `git fetch` and diff against the remote branch, not against the commit you branched from — a stale base makes your push silently revert whatever landed while you worked.
-- **Verify before you push, not after.** There is no PR gate, so the push *is* the merge.
+- **Verify before you push, not after.** There is no PR gate, so the push *is* the merge — and `ci.yml` does not run on this branch (it triggers on `main` only; accepted for now), so nothing runs the tests but you. The DB-backed Go tests need `DATABASE_URL` and **skip silently** without one: run them with `DATABASE_URL="postgres://multica:multica@localhost:5439/multica?sslmode=disable" go test -count=1 -v …` and read the `--- PASS` lines, not the exit code.
 
 ### Commands
 
