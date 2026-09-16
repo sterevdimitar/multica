@@ -621,6 +621,29 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 			return fmt.Errorf("pull-request card lookup: %w", err)
 		}
 		existing, reusedExisting = found, ok
+		// No open card, and the event is a push. Before creating a card, ask
+		// whether this pull request's card already reached `done`: a push to
+		// an approved, still-open branch is the merge reconciler bringing it
+		// forward (or a human doing the same), and the reconciler will merge
+		// the new head on the card that is already at `done`. A fresh card
+		// here would carry a review chain whose verdict nothing reads — the
+		// reconciler's sweep lands it the moment the pull request merges.
+		// Observed 2026-09-16: every reconciler rebase of PR #136 minted a
+		// card and three agent runs. So: no card, no task, a `skipped` run.
+		if !reusedExisting && pushOnDoneCard(*run) {
+			doneCard, ok, err := issueguard.FindDonePullRequestIssue(
+				ctx, qtx, ap.WorkspaceID, ap.ID, slug)
+			if err != nil {
+				return fmt.Errorf("done pull-request card lookup: %w", err)
+			}
+			if ok {
+				return &errDispatchSkipped{
+					reason: fmt.Sprintf("push to %s while its card %s is at done: the merge reconciler owns an approved branch; nothing dispatched",
+						slug, util.UUIDToString(doneCard.ID)),
+					code: dispatch.ReasonAlreadyActive,
+				}
+			}
+		}
 	} else {
 		// Non-PR autopilots keep the title-and-window guard unchanged (I7).
 		duplicate, found, err := issueguard.LockAndFindRecentAutopilotDuplicate(
@@ -1823,6 +1846,19 @@ func pullRequestFor(run db.AutopilotRun) (githubPullRequest, bool) {
 		return githubPullRequest{}, false
 	}
 	return parseGitHubPullRequest(env.Event, env.EventPayload)
+}
+
+// pushOnDoneCard reports whether run is a push to an existing pull request —
+// a `synchronize` — as opposed to an event that gives the pull request new
+// life (`opened`, `reopened`, `ready_for_review`). Only a push can land on a
+// card that is at `done` while its pull request is still open, because
+// GitHub delivers synchronize for open pull requests only; the other actions
+// either precede any card or follow a close, whose card is `cancelled`, not
+// `done`. dispatchCreateIssue consults the `done` card lookup for exactly this
+// case and no other.
+func pushOnDoneCard(run db.AutopilotRun) bool {
+	pr, ok := pullRequestFor(run)
+	return ok && pr.Action == "synchronize"
 }
 
 // pullRequestSlug returns the stable identity of the pull request that caused
