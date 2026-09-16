@@ -103,22 +103,51 @@ UPDATE issue SET
     priority = COALESCE(sqlc.narg('priority'), priority),
     assignee_type = sqlc.narg('assignee_type'),
     assignee_id = sqlc.narg('assignee_id'),
-    position = COALESCE(sqlc.narg('position'), position),
+    -- Top-of-column on status change. Three arms, first match wins:
+    --   1. an explicit position (the board's drag sends one) is honoured;
+    --   2. a status write that actually changes the status computes
+    --      MIN(position) - 1 over the TARGET (workspace, status) column -
+    --      the same rule CreateIssue uses via issueposition.NextTopPosition -
+    --      so the card lands at the top of the column it is entering;
+    --   3. anything else leaves position alone.
+    -- `status` on the left of IS DISTINCT FROM is the row's PRE-update value:
+    -- Postgres evaluates SET expressions against the old row, which is what
+    -- lets a single UPDATE decide "did it move" atomically with the write.
+    -- The six UpdateIssueStatus* queries below carry arm 2 only (they take
+    -- no position) and point back here. The casts pin sqlc's inference so
+    -- the generated Params keep pgtype.Float8 / pgtype.Text.
+    position = CASE
+        WHEN sqlc.narg('position')::float8 IS NOT NULL THEN sqlc.narg('position')::float8
+        WHEN sqlc.narg('status')::text IS NOT NULL
+         AND sqlc.narg('status')::text IS DISTINCT FROM status THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = sqlc.narg('status')::text)
+        ELSE position
+    END,
     start_date = sqlc.narg('start_date'),
     due_date = sqlc.narg('due_date'),
     parent_issue_id = sqlc.narg('parent_issue_id'),
     project_id = sqlc.narg('project_id'),
     stage = sqlc.narg('stage'),
     updated_at = now()
-WHERE id = $1
+WHERE issue.id = $1
 RETURNING *;
 
 -- name: UpdateIssueStatus :one
 -- Workspace_id in the WHERE clause is a SQL-layer tenant guard; see DeleteIssue.
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3
+WHERE issue.id = $1 AND issue.workspace_id = $3
 RETURNING *;
 
 -- name: UpdateIssueStatusAndUnassign :one
@@ -132,10 +161,18 @@ RETURNING *;
 -- mentions nobody, so a still-assigned issue re-triggers its own agent.
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     assignee_type = NULL,
     assignee_id = NULL,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3
+WHERE issue.id = $1 AND issue.workspace_id = $3
 RETURNING *;
 
 -- name: UpdateIssueStatusAndAssign :one
@@ -149,10 +186,18 @@ RETURNING *;
 -- no hold to the pipeline. Workspace_id in the WHERE is the tenant guard.
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     assignee_type = $3,
     assignee_id = $4,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $5
+WHERE issue.id = $1 AND issue.workspace_id = $5
 RETURNING *;
 
 -- name: UpdateIssueStatusIfCurrent :one
@@ -171,8 +216,16 @@ RETURNING *;
 -- must treat it as the race having fired, not as a hard failure.
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3 AND status = ANY(sqlc.arg(current_statuses)::text[])
+WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY(sqlc.arg(current_statuses)::text[])
 RETURNING *;
 
 -- name: UpdateIssueStatusAndUnassignIfCurrent :one
@@ -181,10 +234,18 @@ RETURNING *;
 -- the caller's permitted-current-statuses list.
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     assignee_type = NULL,
     assignee_id = NULL,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3 AND status = ANY(sqlc.arg(current_statuses)::text[])
+WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY(sqlc.arg(current_statuses)::text[])
 RETURNING *;
 
 -- name: UpdateIssueStatusIfCurrentAndInactive :one
@@ -201,6 +262,14 @@ RETURNING *;
 -- error.
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     updated_at = now()
 WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY(sqlc.arg(current_statuses)::text[])
   AND NOT EXISTS (
