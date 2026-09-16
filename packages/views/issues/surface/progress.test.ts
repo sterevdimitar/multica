@@ -263,13 +263,15 @@ describe("completedTotals", () => {
     const rows = groupProgressRows([
       task({
         agent_name: "review-agent",
-        dispatched_at: "2026-08-22T10:00:00Z",
+        dispatched_at: "2026-08-22T09:58:00Z", // 2 min in the queue: not counted
+        job_started_at: "2026-08-22T10:00:00Z",
         started_at: "2026-08-22T10:01:00Z",
         completed_at: "2026-08-22T10:02:30Z", // wall 150s, elapsed 90s
       }),
       task({
         agent_name: "review-validator-agent",
-        dispatched_at: "2026-08-22T10:03:00Z",
+        dispatched_at: "2026-08-22T10:02:58Z",
+        job_started_at: "2026-08-22T10:03:00Z",
         started_at: "2026-08-22T10:03:40Z",
         completed_at: "2026-08-22T10:04:40Z", // wall 100s, elapsed 60s
       }),
@@ -278,6 +280,7 @@ describe("completedTotals", () => {
         status: "running",
         is_live: true,
         dispatched_at: "2026-08-22T10:05:00Z",
+        job_started_at: "2026-08-22T10:05:20Z",
         started_at: "2026-08-22T10:06:00Z",
         completed_at: null,
       }),
@@ -287,6 +290,7 @@ describe("completedTotals", () => {
         is_live: true,
         queued_at: "2026-08-22T10:07:00Z",
         dispatched_at: null,
+        job_started_at: null,
         started_at: null,
         completed_at: null,
       }),
@@ -298,17 +302,35 @@ describe("completedTotals", () => {
 });
 
 describe("wall time", () => {
-  it("sums dispatched→completed over a group", () => {
+  // Card 268, 2026-09-16, the review step: webhook 10:21:36, runner picked
+  // the job up 10:23:48, /start 10:24:04, /complete 10:27:28. 132 s of that
+  // was the GitHub queue with all three runners busy — nothing executing.
+  it("is job start → completed, not webhook → completed: the queue is excluded", () => {
+    const rows = groupProgressRows([
+      task({
+        dispatched_at: "2026-09-16T10:21:36Z",
+        job_started_at: "2026-09-16T10:23:48Z",
+        started_at: "2026-09-16T10:24:04Z",
+        completed_at: "2026-09-16T10:27:28Z",
+      }),
+    ]);
+    expect(rows[0]!.elapsedMs).toBe(204_000);
+    expect(rows[0]!.wallMs).toBe(220_000); // 16 s of startup, not 148 s
+  });
+
+  it("sums job start→completed over a group", () => {
     const rows = groupProgressRows([
       task({
         task_id: "a",
-        dispatched_at: "2026-08-22T09:59:30Z",
+        dispatched_at: "2026-08-22T09:59:00Z",
+        job_started_at: "2026-08-22T09:59:30Z",
         started_at: "2026-08-22T10:00:00Z",
         completed_at: "2026-08-22T10:01:00Z",
       }),
       task({
         task_id: "b",
-        dispatched_at: "2026-08-22T10:01:30Z",
+        dispatched_at: "2026-08-22T10:01:00Z",
+        job_started_at: "2026-08-22T10:01:30Z",
         started_at: "2026-08-22T10:02:00Z",
         completed_at: "2026-08-22T10:03:00Z",
       }),
@@ -322,7 +344,7 @@ describe("wall time", () => {
     const rows = groupProgressRows([
       task({
         task_id: "done",
-        dispatched_at: "2026-08-22T10:00:00Z",
+        job_started_at: "2026-08-22T10:00:00Z",
         started_at: "2026-08-22T10:00:30Z",
         completed_at: "2026-08-22T10:01:30Z",
       }),
@@ -330,7 +352,7 @@ describe("wall time", () => {
         task_id: "live",
         status: "running",
         is_live: true,
-        dispatched_at: "2026-08-22T10:02:00Z",
+        job_started_at: "2026-08-22T10:02:00Z",
         started_at: "2026-08-22T10:02:30Z",
         completed_at: null,
       }),
@@ -344,7 +366,7 @@ describe("wall time", () => {
     const rows = groupProgressRows([
       task({
         task_id: "done",
-        dispatched_at: "2026-08-22T10:00:00Z",
+        job_started_at: "2026-08-22T10:00:00Z",
         started_at: "2026-08-22T10:00:30Z",
         completed_at: "2026-08-22T10:01:30Z",
       }),
@@ -354,6 +376,7 @@ describe("wall time", () => {
         is_live: true,
         queued_at: "2026-08-22T10:02:00Z",
         dispatched_at: null,
+        job_started_at: null,
         started_at: null,
         completed_at: null,
       }),
@@ -363,50 +386,73 @@ describe("wall time", () => {
     expect(rows[0]!.wallMs).toBe(90_000);
   });
 
-  it("anchors on started_at when dispatched_at is missing", () => {
-    // A server that predates the field sends nothing; the wall then equals
-    // the elapsed rather than vanishing or crashing the popover.
-    const rows = groupProgressRows([
-      task({
-        dispatched_at: undefined,
-        started_at: "2026-08-22T10:00:00Z",
-        completed_at: "2026-08-22T10:01:00Z",
-      }),
-    ]);
-    expect(rows[0]!.wallMs).toBe(60_000);
-    expect(rows[0]!.wallMs).toBe(rows[0]!.elapsedMs);
+  it("anchors on started_at when job_started_at is missing", () => {
+    // A server that predates the field sends nothing, and a daemon-run task
+    // reports no startup; the wall then equals the elapsed rather than
+    // vanishing or crashing the popover.
+    for (const missing of [undefined, null]) {
+      const rows = groupProgressRows([
+        task({
+          dispatched_at: "2026-08-22T09:58:00Z",
+          job_started_at: missing,
+          started_at: "2026-08-22T10:00:00Z",
+          completed_at: "2026-08-22T10:01:00Z",
+        }),
+      ]);
+      expect(rows[0]!.wallMs).toBe(60_000);
+      expect(rows[0]!.wallMs).toBe(rows[0]!.elapsedMs);
+    }
   });
 
-  it("a task with neither timestamp leaves wallMs null", () => {
-    const rows = groupProgressRows([
+  it("a finished task that never reached a runner contributes nothing", () => {
+    // Cancelled while queued (card 268's first review: 46 s in the queue,
+    // then a push restarted the chain) and a dispatch_timeout both have a
+    // dispatched_at and a completed_at and nothing in between. The pipeline
+    // executed nothing for them, so they must not put the queue back into
+    // the wall through the back door.
+    for (const t of [
       task({
         status: "cancelled",
-        dispatched_at: null,
+        dispatched_at: "2026-09-16T10:20:48Z",
+        job_started_at: null,
         started_at: null,
-        completed_at: "2026-08-22T10:01:00Z",
+        completed_at: "2026-09-16T10:21:36Z",
       }),
-    ]);
-    expect(rows[0]!.wallMs).toBeNull();
-    expect(rows[0]!.elapsedMs).toBeNull();
+      task({
+        status: "failed",
+        failure_reason: "dispatch_timeout",
+        dispatched_at: "2026-08-22T10:08:00Z",
+        job_started_at: null,
+        started_at: null,
+        completed_at: "2026-08-22T10:26:00Z",
+      }),
+    ]) {
+      const rows = groupProgressRows([t]);
+      expect(rows[0]!.wallMs).toBeNull();
+      expect(rows[0]!.elapsedMs).toBeNull();
+    }
   });
 
   it("wall is never below elapsed on any finished row", () => {
     const rows = groupProgressRows([
       task({
         agent_name: "review-agent",
-        dispatched_at: "2026-08-22T10:00:00Z",
+        dispatched_at: "2026-08-22T09:59:00Z",
+        job_started_at: "2026-08-22T10:00:00Z",
         started_at: "2026-08-22T10:00:45Z",
         completed_at: "2026-08-22T10:03:00Z",
       }),
       task({
         agent_name: "fixer",
-        dispatched_at: undefined,
+        dispatched_at: "2026-08-22T10:03:50Z",
+        job_started_at: undefined,
         started_at: "2026-08-22T10:04:00Z",
         completed_at: "2026-08-22T10:05:00Z",
       }),
       task({
         agent_name: "fixer",
-        dispatched_at: "2026-08-22T10:05:10Z",
+        dispatched_at: "2026-08-22T10:05:05Z",
+        job_started_at: "2026-08-22T10:05:10Z",
         started_at: "2026-08-22T10:06:00Z",
         completed_at: "2026-08-22T10:07:00Z",
       }),
@@ -416,6 +462,7 @@ describe("wall time", () => {
         failure_reason: "dispatch_timeout",
         queued_at: "2026-08-22T10:08:00Z", // never started: sorts by queued_at
         dispatched_at: "2026-08-22T10:08:00Z",
+        job_started_at: null,
         started_at: null,
         completed_at: "2026-08-22T10:26:00Z",
       }),
@@ -426,11 +473,6 @@ describe("wall time", () => {
         expect(r.wallMs).toBeGreaterThanOrEqual(r.elapsedMs);
       }
     }
-    // The dispatch_timeout row: GitHub never started it, so it has no
-    // elapsed — and the pipeline still spent the whole wait on it.
-    const timedOut = rows[rows.length - 1]!;
-    expect(timedOut.elapsedMs).toBeNull();
-    expect(timedOut.wallMs).toBe(18 * 60_000);
   });
 });
 

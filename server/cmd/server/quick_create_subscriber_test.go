@@ -55,7 +55,7 @@ func TestQuickCreateCompletion_SubscribesRequester(t *testing.T) {
 	); err != nil {
 		t.Fatalf("dispatch task: %v", err)
 	}
-	if _, err := queries.StartAgentTask(ctx, task.ID); err != nil {
+	if _, err := queries.StartAgentTask(ctx, db.StartAgentTaskParams{ID: task.ID}); err != nil {
 		t.Fatalf("StartAgentTask: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestQuickCreateFailure_DoesNotSubscribeRequester(t *testing.T) {
 	); err != nil {
 		t.Fatalf("dispatch task: %v", err)
 	}
-	if _, err := queries.StartAgentTask(ctx, task.ID); err != nil {
+	if _, err := queries.StartAgentTask(ctx, db.StartAgentTaskParams{ID: task.ID}); err != nil {
 		t.Fatalf("StartAgentTask: %v", err)
 	}
 

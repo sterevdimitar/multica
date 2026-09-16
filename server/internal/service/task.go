@@ -2513,8 +2513,19 @@ func (s *TaskService) maybeLogClaimSlow(agentID pgtype.UUID, outcome string, sta
 
 // StartTask transitions a dispatched task to running.
 // Issue status is NOT changed here — the agent manages it via the CLI.
-func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID) (*db.AgentTaskQueue, error) {
-	task, err := s.Queries.StartAgentTask(ctx, taskID)
+//
+// startupMs is how long the caller had already been executing when it
+// called — the runner measures it from its job's first step; the daemon
+// passes nil. It is a duration so the caller's clock never reaches the
+// database: job_started_at is derived server-side (now() - startupMs) and
+// therefore never exceeds started_at, which is the invariant the progress
+// popover's wall ≥ elapsed rests on. nil leaves job_started_at NULL.
+func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID, startupMs *int64) (*db.AgentTaskQueue, error) {
+	params := db.StartAgentTaskParams{ID: taskID}
+	if startupMs != nil {
+		params.StartupMs = pgtype.Int8{Int64: *startupMs, Valid: true}
+	}
+	task, err := s.Queries.StartAgentTask(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("start task: %w", err)
 	}

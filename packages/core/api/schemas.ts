@@ -837,10 +837,17 @@ export const IssueProgressTaskSchema = z.object({
   agent_name: z.string().default(""),
   status: z.string().default(""),
   queued_at: z.string().default(""),
-  // The instant the fork fired the webhook — the left end of the popover's
-  // wall-time span (dispatched_at → completed_at). Servers that predate the
-  // field send nothing; the transform then anchors on started_at instead.
+  // The instant the fork fired the webhook. Carried, but NOT the wall
+  // anchor: from here to job_started_at is the GitHub queue, during which
+  // nothing executes.
   dispatched_at: z.string().nullish(),
+  // The instant the runner's job began executing — the left end of the
+  // popover's wall-time span (job_started_at → completed_at). Derived on
+  // the server's clock, so never later than started_at. Absent from a
+  // server that predates the field, and null for a task that never reached
+  // a runner or was started by the daemon; the transform then anchors on
+  // started_at instead.
+  job_started_at: z.string().nullish(),
   started_at: z.string().nullish(),
   completed_at: z.string().nullish(),
   tokens: IssueProgressTokensSchema.default({
