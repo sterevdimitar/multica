@@ -365,6 +365,21 @@ WHERE workspace_id = $1
 ORDER BY created_at DESC
 LIMIT 1;
 
+-- name: FindDoneAutopilotIssueForPullRequest :one
+-- The card a push found instead of an open one: the same pull request's card
+-- that already reached `done`. Read by the synchronize path when
+-- FindOpenAutopilotIssueForPullRequest misses, to decide whether the push is
+-- to an approved, still-open branch (dispatch nothing) rather than to a
+-- pull request that has no card at all (create one).
+SELECT * FROM issue
+WHERE workspace_id = $1
+  AND origin_type = 'autopilot'
+  AND origin_id = $2
+  AND metadata ->> 'pull_request' = sqlc.arg('pull_request_slug')::text
+  AND status = 'done'
+ORDER BY created_at DESC
+LIMIT 1;
+
 -- name: DeleteIssue :exec
 -- Defense-in-depth: the workspace_id predicate makes the tenant invariant a
 -- SQL-layer guarantee rather than a handler-layer one. Handler loaders

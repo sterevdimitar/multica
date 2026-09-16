@@ -542,6 +542,62 @@ func (q *Queries) FindActiveDuplicateIssue(ctx context.Context, arg FindActiveDu
 	return i, err
 }
 
+const findDoneAutopilotIssueForPullRequest = `-- name: FindDoneAutopilotIssueForPullRequest :one
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties FROM issue
+WHERE workspace_id = $1
+  AND origin_type = 'autopilot'
+  AND origin_id = $2
+  AND metadata ->> 'pull_request' = $3::text
+  AND status = 'done'
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type FindDoneAutopilotIssueForPullRequestParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	OriginID        pgtype.UUID `json:"origin_id"`
+	PullRequestSlug string      `json:"pull_request_slug"`
+}
+
+// The card a push found instead of an open one: the same pull request's card
+// that already reached `done`. Read by the synchronize path when
+// FindOpenAutopilotIssueForPullRequest misses, to decide whether the push is
+// to an approved, still-open branch (dispatch nothing) rather than to a
+// pull request that has no card at all (create one).
+func (q *Queries) FindDoneAutopilotIssueForPullRequest(ctx context.Context, arg FindDoneAutopilotIssueForPullRequestParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, findDoneAutopilotIssueForPullRequest, arg.WorkspaceID, arg.OriginID, arg.PullRequestSlug)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+	)
+	return i, err
+}
+
 const findOpenAutopilotIssueForPullRequest = `-- name: FindOpenAutopilotIssueForPullRequest :one
 SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties FROM issue
 WHERE workspace_id = $1

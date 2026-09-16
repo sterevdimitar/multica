@@ -143,6 +143,45 @@ func LockAndFindOpenPullRequestIssue(
 	return issue, true, nil
 }
 
+// FindDonePullRequestIssue is the second question the synchronize path asks
+// when LockAndFindOpenPullRequestIssue misses: does this pull request already
+// have a card at `done`? A `done` card on a pull request that is still open
+// (a synchronize is only ever delivered for an open one) is an approved
+// branch the merge reconciler owns — it rebases and merges it while the card
+// stays at `done`, and each of its pushes arrives here as a synchronize. Such
+// a push must not become a second card; the caller skips the dispatch.
+//
+// Takes no lock of its own: it is called inside the transaction that already
+// holds pullRequestLockKey through LockAndFindOpenPullRequestIssue, and the
+// answer is read-only. Calling it outside that lock is a race with a
+// concurrent delivery, so do not.
+//
+// `cancelled` and `archived` are deliberately NOT matched. A cancelled card
+// belongs to a pull request that was closed; a push to it can only follow a
+// reopen, whose own event has already created the fresh card that
+// LockAndFindOpenPullRequestIssue then finds. An archived card is the archive
+// design's business (a push to it starts a fresh card, by that design).
+func FindDonePullRequestIssue(
+	ctx context.Context, q *db.Queries,
+	workspaceID, autopilotID pgtype.UUID, slug string,
+) (db.Issue, bool, error) {
+	if slug == "" || !autopilotID.Valid {
+		return db.Issue{}, false, nil
+	}
+	issue, err := q.FindDoneAutopilotIssueForPullRequest(ctx, db.FindDoneAutopilotIssueForPullRequestParams{
+		WorkspaceID:     workspaceID,
+		OriginID:        autopilotID,
+		PullRequestSlug: slug,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.Issue{}, false, nil
+		}
+		return db.Issue{}, false, err
+	}
+	return issue, true, nil
+}
+
 func lockKey(workspaceID, projectID, parentIssueID pgtype.UUID, normalizedTitle string) string {
 	return strings.Join([]string{
 		"issue-active-duplicate",
