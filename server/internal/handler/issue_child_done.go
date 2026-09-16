@@ -338,7 +338,7 @@ func (h *Handler) postChildDoneComment(ctx context.Context, parent, completed db
 // "finished" for stage-barrier purposes. Cancelled counts as terminal: a
 // cancelled sibling will never complete, so it must not hold a stage open.
 func isTerminalChildStatus(status string) bool {
-	return status == "done" || status == "cancelled"
+	return status == "done" || status == "cancelled" || status == "archived"
 }
 
 // siblingsAreStaged reports whether any child in the set carries an explicit

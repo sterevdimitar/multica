@@ -70,7 +70,7 @@ func TestMayPromoteToRunning(t *testing.T) {
 		})
 	}
 
-	disallowed := []string{"in_review", "done", "cancelled", "", "nonsense"}
+	disallowed := []string{"in_review", "done", "cancelled", "archived", "", "nonsense"}
 	for _, status := range disallowed {
 		t.Run(status, func(t *testing.T) {
 			if MayPromoteToRunning(status) {

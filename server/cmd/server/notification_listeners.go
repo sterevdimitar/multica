@@ -29,6 +29,7 @@ var statusLabels = map[string]string{
 	"done":        "Done",
 	"blocked":     "Blocked",
 	"cancelled":   "Cancelled",
+	"archived":    "Archived",
 }
 
 // priorityLabels maps DB priority values to human-readable labels for notifications.
@@ -151,6 +152,7 @@ var terminalStatusForTaskFailedDismiss = map[string]bool{
 	"in_review": true,
 	"done":      true,
 	"cancelled": true,
+	"archived":  true,
 }
 
 // archiveStaleTaskFailedInbox archives all task_failed inbox rows for the

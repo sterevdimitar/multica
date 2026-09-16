@@ -14,10 +14,16 @@ import (
 )
 
 // Issue status constants, mirroring the CHECK constraint on issue.status
-// (server/migrations/001_init.up.sql:58):
+// (server/migrations/001_init.up.sql:58, widened by 208_issue_archived_status):
 //
 //	CHECK (status IN ('backlog', 'todo', 'in_progress', 'in_review', 'done',
-//	                   'blocked', 'cancelled'))
+//	                   'blocked', 'cancelled', 'archived'))
+//
+// StatusArchived is terminal like done/cancelled and, unlike them, inert:
+// no trigger dispatches a run on an archived card (issue_trigger.go,
+// handler/comment.go) and only a human moves one out. It is written by a
+// human or by the archive sweeper (ArchiveStaleTerminalIssues) once a card
+// has sat in done/cancelled for ISSUE_ARCHIVE_AFTER.
 const (
 	StatusBacklog    = "backlog"
 	StatusTodo       = "todo"
@@ -26,6 +32,7 @@ const (
 	StatusDone       = "done"
 	StatusBlocked    = "blocked"
 	StatusCancelled  = "cancelled"
+	StatusArchived   = "archived"
 )
 
 // runStartStatusByAgent maps an agent name to the issue status a dispatched
@@ -69,6 +76,10 @@ func RunStartStatus(agentName string) string {
 // caller loudly; it would just make the promotion path return early for every
 // card after the first dispatch. The same applies to MarkIssueBlocked
 // re-blocking an already-blocked card.
+//
+// StatusArchived is deliberately absent. Default-refuse is what keeps both
+// lifecycle writers off an archived card; adding the entry would let a late
+// run promote a card a human (or the sweeper) had put away.
 var promotableStatuses = map[string]bool{
 	StatusBacklog:    true,
 	StatusTodo:       true,

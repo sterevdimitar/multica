@@ -117,7 +117,8 @@ and is hidden from the PR list.
 |---|---|---|
 | Create-time: agent-assigned, non-backlog issue enqueues immediately | `server/internal/handler/issue.go:2263-2264` | new citation |
 | `shouldEnqueueAgentTask` returns false for `backlog` (parking lot) | `server/internal/handler/issue.go:2644-2648` | new citation |
-| Backlog → non-backlog (not done/cancelled) enqueues on update | `server/internal/handler/issue.go:2537-2540` | `:2523` |
+| `archived` is terminal (open reads exclude it) and inert (`WillEnqueueRun`, `computeCommentAgentTriggers`, `handleControlVerb` refuse it); the archive sweeper moves done/cancelled cards there after `ISSUE_ARCHIVE_AFTER` | `server/internal/service/issue_trigger.go`, `server/internal/handler/comment.go`, `server/internal/service/issue_lifecycle.go` (`ArchiveStaleTerminalIssues`), `server/cmd/server/issue_archive_sweeper.go` | new citation |
+| Backlog → non-backlog (not done/cancelled/archived) enqueues on update | `server/internal/handler/issue.go:2537-2540` | `:2523` |
 | Same contract in batch update | `server/internal/handler/issue.go:3021-3024` | new citation |
 | Child → `done` notifies + wakes the parent, gated by the stage barrier | `server/internal/handler/issue_child_done.go:66` (`notifyParentOfChildDone`; doc comment at `:15`; barrier gate at `:115`) | func def `:51` |
 | Status change (incl. → `cancelled`) does NOT cancel in-flight tasks; only issue deletion does (MUL-4465) | no-cancel note in `server/internal/handler/issue.go:2652-2658` (`UpdateIssue`) and `:3170-3171` (`BatchUpdateIssues`); deletion still cancels at `:2863` (`DeleteIssue`) / `:3239` (`BatchDeleteIssues`) via `CancelTasksForIssue` (`server/internal/service/task.go:1229`) | new citation |

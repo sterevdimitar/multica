@@ -189,6 +189,11 @@ on it. These are the contracts, not advice:
   `done` it enqueues no new agent work, but it does **not** stop tasks already in
   flight — a run in progress keeps going (MUL-4465). To stop a running task,
   cancel the task itself.
+- **`archived`** is terminal and inert: finished work put out of the way. A card
+  in `done` or `cancelled` moves there on its own after `ISSUE_ARCHIVE_AFTER`
+  (72h by default), or when a human moves it. Nothing dispatches on an archived
+  card — not assignment, not a comment or @mention — and `/park` is refused; a
+  human moves it out first. Like `cancelled` it does not stop tasks in flight.
 
 ## Sub-issues: `todo` starts work now, `backlog` parks it
 
