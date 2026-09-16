@@ -476,7 +476,7 @@ func (q *Queries) ListDashboardUsageDaily(ctx context.Context, arg ListDashboard
 
 const listTaskProgressByIssue = `-- name: ListTaskProgressByIssue :many
 SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
-       atq.created_at, atq.started_at, atq.completed_at,
+       atq.created_at, atq.dispatched_at, atq.started_at, atq.completed_at,
        atq.failure_reason,
        a.custom_args AS agent_custom_args,
        COALESCE(SUM(tu.input_tokens), 0)::bigint       AS input_tokens,
@@ -495,7 +495,7 @@ FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 LEFT JOIN task_usage tu ON tu.task_id = atq.id
 WHERE atq.issue_id = $1
-GROUP BY atq.id, a.name, a.custom_args, atq.status, atq.created_at, atq.started_at, atq.completed_at, atq.failure_reason
+GROUP BY atq.id, a.name, a.custom_args, atq.status, atq.created_at, atq.dispatched_at, atq.started_at, atq.completed_at, atq.failure_reason
 ORDER BY COALESCE(atq.started_at, atq.created_at) ASC
 `
 
@@ -504,6 +504,7 @@ type ListTaskProgressByIssueRow struct {
 	AgentName        string             `json:"agent_name"`
 	Status           string             `json:"status"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	DispatchedAt     pgtype.Timestamptz `json:"dispatched_at"`
 	StartedAt        pgtype.Timestamptz `json:"started_at"`
 	CompletedAt      pgtype.Timestamptz `json:"completed_at"`
 	FailureReason    pgtype.Text        `json:"failure_reason"`
@@ -526,6 +527,11 @@ type ListTaskProgressByIssueRow struct {
 // turn budget retroactively changes the denominator on historical rows. The
 // alternative is a per-task column and a migration, which is not worth it for
 // a display number.
+// dispatched_at is the left end of the popover's wall-time span
+// (dispatched_at -> completed_at): the instant the fork fired the webhook.
+// started_at cannot serve — the runner posts /start well into its job, after
+// the GitHub queue and its own setup — so a total built on it misses the
+// startup a person is actually waiting through.
 // failure_reason is carried so a failed step can say WHY on the board. The
 // turn count cannot: `--max-turns` counts tool-use turns only while the
 // reported num_turns also counts the final text turn, so a run that stopped
@@ -545,6 +551,7 @@ func (q *Queries) ListTaskProgressByIssue(ctx context.Context, issueID pgtype.UU
 			&i.AgentName,
 			&i.Status,
 			&i.CreatedAt,
+			&i.DispatchedAt,
 			&i.StartedAt,
 			&i.CompletedAt,
 			&i.FailureReason,
