@@ -194,7 +194,31 @@
     "success_title": "电脑已连接",
     "success_description": "电脑已经上线就绪。创建一个智能体，task 就可以派发到这里运行。",
     "view_runtime": "查看运行时",
-    "create_agent": "创建智能体"
+    "create_agent": "创建智能体",
+    "webhook": {
+      "toggle": "Webhook 运行时 — 自托管 runner 容器",
+      "intro": "在将要执行任务的机器上运行以下命令。除两个密钥外，所有值都已填好。",
+      "name_label": "名称",
+      "label_prefix": "runs_on:",
+      "name_invalid": "名称至少要包含一个字母或数字。",
+      "missing_config": "请管理员设置以下服务器变量，然后重新打开此对话框：{{vars}}",
+      "tab_windows": "Windows (WSL)",
+      "tab_macos": "macOS",
+      "tab_linux": "Linux",
+      "req_windows": "需要 WSL 2 及 Ubuntu 发行版、在其中运行的 Docker，以及在 WSL 内已登录的 gh CLI（gh auth login）。第 1–4 步在 WSL shell 中运行；第 5 步在 PowerShell 中运行，可让 WSL 和 runner 一直保持运行，直到你注销。",
+      "req_macos": "需要 Docker Desktop 或 OrbStack，以及已登录的 gh CLI（brew install gh）。",
+      "req_linux": "需要带 compose 插件的 Docker Engine，以及已登录的 gh CLI。",
+      "step_fetch": "获取 runner 文件",
+      "step_env": "写入 .env（切勿提交）",
+      "step_up": "启动 runner 容器",
+      "step_register": "注册运行时",
+      "step_keepalive": "保持 WSL 运行（在 Windows 的 PowerShell 中）",
+      "secrets_summary": "密钥从哪里来",
+      "secret_token": "<YOUR_TOKEN> — 在 设置 → 令牌 中创建的 Multica 令牌。",
+      "secret_webhook": "<WEBHOOK_SECRET> — 分发服务用来校验的共享密钥，与注册现有 Webhook 运行时所用的相同。",
+      "secret_gh": "gh auth token 会用作 runner 的 ACCESS_TOKEN；只对该仓库授予 Administration: read & write 的 fine-grained PAT 权限更小。",
+      "success_description": "运行时已注册。将它分配给某个代理即可开始分发。"
+    }
   },
   "cloud_runtime": {
     "action": "云端运行时",

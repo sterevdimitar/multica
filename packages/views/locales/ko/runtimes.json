@@ -194,7 +194,31 @@
     "success_title": "컴퓨터 연결됨",
     "success_description": "컴퓨터가 온라인이며 준비되었습니다. 에이전트를 만들면 여기서 작업을 맡을 수 있습니다.",
     "view_runtime": "런타임 보기",
-    "create_agent": "에이전트 만들기"
+    "create_agent": "에이전트 만들기",
+    "webhook": {
+      "toggle": "Webhook 런타임 — 자체 호스팅 러너 컨테이너",
+      "intro": "작업을 처리할 머신에서 아래 명령을 실행하세요. 두 개의 시크릿을 제외한 모든 값은 이미 채워져 있습니다.",
+      "name_label": "이름",
+      "label_prefix": "runs_on:",
+      "name_invalid": "이름에는 영문자나 숫자가 하나 이상 있어야 합니다.",
+      "missing_config": "관리자에게 다음 서버 변수를 설정해 달라고 요청한 뒤 이 대화 상자를 다시 여세요: {{vars}}",
+      "tab_windows": "Windows (WSL)",
+      "tab_macos": "macOS",
+      "tab_linux": "Linux",
+      "req_windows": "WSL 2와 Ubuntu 배포판, 그 안에서 실행 중인 Docker, 그리고 WSL 안에서 로그인된 gh CLI(gh auth login)가 필요합니다. 1~4단계는 WSL 셸에서, 5단계는 PowerShell에서 실행하며 로그오프할 때까지 WSL과 러너를 살려 둡니다.",
+      "req_macos": "Docker Desktop 또는 OrbStack과 로그인된 gh CLI(brew install gh)가 필요합니다.",
+      "req_linux": "compose 플러그인이 포함된 Docker Engine과 로그인된 gh CLI가 필요합니다.",
+      "step_fetch": "러너 파일 가져오기",
+      "step_env": ".env 작성 (절대 커밋하지 마세요)",
+      "step_up": "러너 컨테이너 시작",
+      "step_register": "런타임 등록",
+      "step_keepalive": "WSL 유지 (Windows의 PowerShell에서)",
+      "secrets_summary": "시크릿은 어디서 가져오나요",
+      "secret_token": "<YOUR_TOKEN> — 설정 → 토큰에서 만든 Multica 토큰.",
+      "secret_webhook": "<WEBHOOK_SECRET> — 디스패치 서비스가 검증하는 공유 시크릿. 기존 Webhook 런타임을 등록할 때 쓴 것과 같습니다.",
+      "secret_gh": "gh auth token은 러너의 ACCESS_TOKEN으로 사용됩니다. 해당 저장소 하나에만 Administration: read & write 권한을 준 fine-grained PAT가 더 좁은 선택입니다.",
+      "success_description": "런타임이 등록되었습니다. 에이전트에 할당하면 디스패치가 시작됩니다."
+    }
   },
   "cloud_runtime": {
     "action": "클라우드 런타임",

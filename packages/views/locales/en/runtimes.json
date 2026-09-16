@@ -206,7 +206,31 @@
     "success_title": "Computer connected",
     "success_description": "Your computer is online and ready. Create an agent and it can start picking up tasks here.",
     "view_runtime": "View runtime",
-    "create_agent": "Create an agent"
+    "create_agent": "Create an agent",
+    "webhook": {
+      "toggle": "Webhook runtime — self-hosted runner containers",
+      "intro": "Run these on the machine that will serve the jobs. Every value below is filled in except the two secrets.",
+      "name_label": "Name",
+      "label_prefix": "runs_on:",
+      "name_invalid": "Name must contain a letter or digit.",
+      "missing_config": "Ask your admin to set these server variables, then reopen this dialog: {{vars}}",
+      "tab_windows": "Windows (WSL)",
+      "tab_macos": "macOS",
+      "tab_linux": "Linux",
+      "req_windows": "Requires WSL 2 with an Ubuntu distro, Docker running inside it, and the gh CLI signed in (gh auth login) inside WSL. Steps 1–4 run in the WSL shell; step 5 runs in PowerShell and keeps WSL — and the runners — alive until you log off.",
+      "req_macos": "Requires Docker Desktop or OrbStack, and the gh CLI (brew install gh) signed in.",
+      "req_linux": "Requires Docker Engine with the compose plugin, and the gh CLI signed in.",
+      "step_fetch": "Get the runner files",
+      "step_env": "Write .env (never commit it)",
+      "step_up": "Start the runner containers",
+      "step_register": "Register the runtime",
+      "step_keepalive": "Keep WSL alive (PowerShell, on Windows)",
+      "secrets_summary": "Where the secrets come from",
+      "secret_token": "<YOUR_TOKEN> — a Multica token from Settings → Tokens.",
+      "secret_webhook": "<WEBHOOK_SECRET> — the shared secret your dispatch service verifies; the same one your existing webhook runtime was registered with.",
+      "secret_gh": "gh auth token is used as the runner's ACCESS_TOKEN; a fine-grained PAT with Administration: read & write on the one repository is the narrower choice.",
+      "success_description": "Runtime registered. Assign it to an agent to start dispatching."
+    }
   },
   "cloud_runtime": {
     "action": "Cloud Runtime",

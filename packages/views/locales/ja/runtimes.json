@@ -194,7 +194,31 @@
     "success_title": "コンピュータを接続しました",
     "success_description": "コンピュータがオンラインになり、準備ができました。エージェントを作成すると、ここでタスクを引き受け始められます。",
     "view_runtime": "ランタイムを表示",
-    "create_agent": "エージェントを作成"
+    "create_agent": "エージェントを作成",
+    "webhook": {
+      "toggle": "Webhook ランタイム — セルフホストのランナーコンテナ",
+      "intro": "ジョブを実行するマシンで以下を実行してください。2 つのシークレット以外の値はすべて入力済みです。",
+      "name_label": "名前",
+      "label_prefix": "runs_on:",
+      "name_invalid": "名前には英数字を 1 文字以上含めてください。",
+      "missing_config": "管理者に次のサーバー変数を設定してもらってから、このダイアログを開き直してください: {{vars}}",
+      "tab_windows": "Windows (WSL)",
+      "tab_macos": "macOS",
+      "tab_linux": "Linux",
+      "req_windows": "WSL 2 と Ubuntu ディストリビューション、その中で動作する Docker、および WSL 内でサインイン済みの gh CLI（gh auth login）が必要です。手順 1〜4 は WSL のシェルで、手順 5 は PowerShell で実行します。手順 5 はログオフまで WSL とランナーを起動したままにします。",
+      "req_macos": "Docker Desktop または OrbStack と、サインイン済みの gh CLI（brew install gh）が必要です。",
+      "req_linux": "compose プラグイン付きの Docker Engine と、サインイン済みの gh CLI が必要です。",
+      "step_fetch": "ランナーのファイルを取得する",
+      "step_env": ".env を書き込む（コミットしないこと）",
+      "step_up": "ランナーコンテナを起動する",
+      "step_register": "ランタイムを登録する",
+      "step_keepalive": "WSL を起動したままにする（Windows の PowerShell で）",
+      "secrets_summary": "シークレットの入手先",
+      "secret_token": "<YOUR_TOKEN> — 設定 → トークン で発行した Multica トークン。",
+      "secret_webhook": "<WEBHOOK_SECRET> — ディスパッチサービスが検証する共有シークレット。既存の Webhook ランタイムを登録したときと同じものです。",
+      "secret_gh": "gh auth token はランナーの ACCESS_TOKEN として使われます。対象リポジトリ 1 つに Administration: read & write を付けた fine-grained PAT のほうが権限を絞れます。",
+      "success_description": "ランタイムを登録しました。エージェントに割り当てるとディスパッチが始まります。"
+    }
   },
   "cloud_runtime": {
     "action": "クラウドランタイム",
