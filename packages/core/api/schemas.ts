@@ -837,6 +837,10 @@ export const IssueProgressTaskSchema = z.object({
   agent_name: z.string().default(""),
   status: z.string().default(""),
   queued_at: z.string().default(""),
+  // The instant the fork fired the webhook — the left end of the popover's
+  // wall-time span (dispatched_at → completed_at). Servers that predate the
+  // field send nothing; the transform then anchors on started_at instead.
+  dispatched_at: z.string().nullish(),
   started_at: z.string().nullish(),
   completed_at: z.string().nullish(),
   tokens: IssueProgressTokensSchema.default({

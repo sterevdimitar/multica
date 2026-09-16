@@ -258,6 +258,180 @@ describe("completedTotals", () => {
     expect(totals.turns).toBe(3);
     expect(totals.elapsedMs).toBe(60_000);
   });
+
+  it("sums wallMs over finished rows and skips live and queued ones", () => {
+    const rows = groupProgressRows([
+      task({
+        agent_name: "review-agent",
+        dispatched_at: "2026-08-22T10:00:00Z",
+        started_at: "2026-08-22T10:01:00Z",
+        completed_at: "2026-08-22T10:02:30Z", // wall 150s, elapsed 90s
+      }),
+      task({
+        agent_name: "review-validator-agent",
+        dispatched_at: "2026-08-22T10:03:00Z",
+        started_at: "2026-08-22T10:03:40Z",
+        completed_at: "2026-08-22T10:04:40Z", // wall 100s, elapsed 60s
+      }),
+      task({
+        agent_name: "fixer",
+        status: "running",
+        is_live: true,
+        dispatched_at: "2026-08-22T10:05:00Z",
+        started_at: "2026-08-22T10:06:00Z",
+        completed_at: null,
+      }),
+      task({
+        agent_name: "readiness-agent",
+        status: "queued",
+        is_live: true,
+        queued_at: "2026-08-22T10:07:00Z",
+        dispatched_at: null,
+        started_at: null,
+        completed_at: null,
+      }),
+    ]);
+    const totals = completedTotals(rows);
+    expect(totals.wallMs).toBe(250_000);
+    expect(totals.elapsedMs).toBe(150_000);
+  });
+});
+
+describe("wall time", () => {
+  it("sums dispatched→completed over a group", () => {
+    const rows = groupProgressRows([
+      task({
+        task_id: "a",
+        dispatched_at: "2026-08-22T09:59:30Z",
+        started_at: "2026-08-22T10:00:00Z",
+        completed_at: "2026-08-22T10:01:00Z",
+      }),
+      task({
+        task_id: "b",
+        dispatched_at: "2026-08-22T10:01:30Z",
+        started_at: "2026-08-22T10:02:00Z",
+        completed_at: "2026-08-22T10:03:00Z",
+      }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.elapsedMs).toBe(120_000);
+    expect(rows[0]!.wallMs).toBe(180_000);
+  });
+
+  it("a live member adds nothing", () => {
+    const rows = groupProgressRows([
+      task({
+        task_id: "done",
+        dispatched_at: "2026-08-22T10:00:00Z",
+        started_at: "2026-08-22T10:00:30Z",
+        completed_at: "2026-08-22T10:01:30Z",
+      }),
+      task({
+        task_id: "live",
+        status: "running",
+        is_live: true,
+        dispatched_at: "2026-08-22T10:02:00Z",
+        started_at: "2026-08-22T10:02:30Z",
+        completed_at: null,
+      }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("live");
+    expect(rows[0]!.wallMs).toBe(90_000);
+  });
+
+  it("a queued member adds nothing", () => {
+    const rows = groupProgressRows([
+      task({
+        task_id: "done",
+        dispatched_at: "2026-08-22T10:00:00Z",
+        started_at: "2026-08-22T10:00:30Z",
+        completed_at: "2026-08-22T10:01:30Z",
+      }),
+      task({
+        task_id: "waiting",
+        status: "queued",
+        is_live: true,
+        queued_at: "2026-08-22T10:02:00Z",
+        dispatched_at: null,
+        started_at: null,
+        completed_at: null,
+      }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("queued");
+    expect(rows[0]!.wallMs).toBe(90_000);
+  });
+
+  it("anchors on started_at when dispatched_at is missing", () => {
+    // A server that predates the field sends nothing; the wall then equals
+    // the elapsed rather than vanishing or crashing the popover.
+    const rows = groupProgressRows([
+      task({
+        dispatched_at: undefined,
+        started_at: "2026-08-22T10:00:00Z",
+        completed_at: "2026-08-22T10:01:00Z",
+      }),
+    ]);
+    expect(rows[0]!.wallMs).toBe(60_000);
+    expect(rows[0]!.wallMs).toBe(rows[0]!.elapsedMs);
+  });
+
+  it("a task with neither timestamp leaves wallMs null", () => {
+    const rows = groupProgressRows([
+      task({
+        status: "cancelled",
+        dispatched_at: null,
+        started_at: null,
+        completed_at: "2026-08-22T10:01:00Z",
+      }),
+    ]);
+    expect(rows[0]!.wallMs).toBeNull();
+    expect(rows[0]!.elapsedMs).toBeNull();
+  });
+
+  it("wall is never below elapsed on any finished row", () => {
+    const rows = groupProgressRows([
+      task({
+        agent_name: "review-agent",
+        dispatched_at: "2026-08-22T10:00:00Z",
+        started_at: "2026-08-22T10:00:45Z",
+        completed_at: "2026-08-22T10:03:00Z",
+      }),
+      task({
+        agent_name: "fixer",
+        dispatched_at: undefined,
+        started_at: "2026-08-22T10:04:00Z",
+        completed_at: "2026-08-22T10:05:00Z",
+      }),
+      task({
+        agent_name: "fixer",
+        dispatched_at: "2026-08-22T10:05:10Z",
+        started_at: "2026-08-22T10:06:00Z",
+        completed_at: "2026-08-22T10:07:00Z",
+      }),
+      task({
+        agent_name: "review-agent",
+        status: "failed",
+        failure_reason: "dispatch_timeout",
+        queued_at: "2026-08-22T10:08:00Z", // never started: sorts by queued_at
+        dispatched_at: "2026-08-22T10:08:00Z",
+        started_at: null,
+        completed_at: "2026-08-22T10:26:00Z",
+      }),
+    ]);
+    expect(rows.length).toBeGreaterThan(1);
+    for (const r of rows) {
+      if (r.wallMs !== null && r.elapsedMs !== null) {
+        expect(r.wallMs).toBeGreaterThanOrEqual(r.elapsedMs);
+      }
+    }
+    // The dispatch_timeout row: GitHub never started it, so it has no
+    // elapsed — and the pipeline still spent the whole wait on it.
+    const timedOut = rows[rows.length - 1]!;
+    expect(timedOut.elapsedMs).toBeNull();
+    expect(timedOut.wallMs).toBe(18 * 60_000);
+  });
 });
 
 describe("cost", () => {

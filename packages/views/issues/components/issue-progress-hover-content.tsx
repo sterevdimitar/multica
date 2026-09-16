@@ -211,7 +211,14 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
               cannot be compared against the last run. */}
           <tr className="border-t border-border text-muted-foreground">
             <td className="text-left">{t(($) => $.progress.completed_footer)}</td>
-            <td className="text-right">{formatElapsed(totals.elapsedMs)}</td>
+            {/* Two times, no label: the pipeline's wall time first (webhook
+                sent → /complete received, summed over finished steps), then
+                the agents' own time. The gap between them is the GitHub
+                queue and the runner's setup — never agent work. Design:
+                dev-command-center specs/2026-09-16-pipeline-wall-time. */}
+            <td className="whitespace-nowrap text-right">
+              {formatElapsed(totals.wallMs)} {formatElapsed(totals.elapsedMs)}
+            </td>
             <td className="text-right">{formatTokens(totals.tokens)}</td>
             <td className="text-right">{formatCost(totals.costUsd)}</td>
             <td className="text-right">{totals.turns}</td>

@@ -65,6 +65,16 @@ export interface ProgressRow {
    * the ticking part from liveStartedAt.
    */
   elapsedMs: number | null;
+  /**
+   * Summed completed_at − dispatched_at over members that have both: the
+   * time the PIPELINE spent on the step — the GitHub queue, the runner's
+   * setup, the agent, the step-finalizer — where elapsedMs is only the
+   * agent's share of it. The anchor falls back to started_at when
+   * dispatched_at is missing (an older server), so wallMs is never less
+   * than elapsedMs on the same row. null when no member has a span; a live
+   * or queued member contributes nothing, exactly as for elapsedMs.
+   */
+  wallMs: number | null;
   /** started_at of the live member, the timer anchor. null when not live. */
   liveStartedAt: string | null;
   taskIds: string[];
@@ -159,6 +169,7 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
               maxTurns: 0,
               failureReason: "",
               elapsedMs: null,
+              wallMs: null,
               liveStartedAt: null,
               taskIds: [],
             };
@@ -205,6 +216,12 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
 
     const span = spanMs(t.started_at, t.completed_at);
     if (span !== null) row.elapsedMs = (row.elapsedMs ?? 0) + span;
+    // Wire data, read defensively like failure_reason: a server that
+    // predates dispatched_at omits it, and the wall then anchors on
+    // started_at — equal to elapsed, never absent and never below it.
+    const wallAnchor = typeof t.dispatched_at === "string" ? t.dispatched_at : t.started_at;
+    const wall = spanMs(wallAnchor, t.completed_at);
+    if (wall !== null) row.wallMs = (row.wallMs ?? 0) + wall;
 
     if (row.status !== "live" && row.status !== "queued") {
       if (FAILED_STATUSES.has(t.status)) {
@@ -239,6 +256,9 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
  */
 export function completedTotals(rows: ProgressRow[]): {
   elapsedMs: number;
+  /** The pipeline's time over the same rows — dispatched → completed per
+   *  step, summed. Rendered in front of elapsedMs in the footer. */
+  wallMs: number;
   /** Sum of the measured completed rows; null when none reported tokens —
    *  same rule as costUsd: three dashes must total a dash, not 0. */
   tokens: number | null;
@@ -247,12 +267,14 @@ export function completedTotals(rows: ProgressRow[]): {
   costUsd: number | null;
 } {
   let elapsedMs = 0;
+  let wallMs = 0;
   let tokens: number | null = null;
   let turns = 0;
   let costUsd: number | null = null;
   for (const r of rows) {
     if (r.status === "live" || r.status === "queued") continue;
     elapsedMs += r.elapsedMs ?? 0;
+    wallMs += r.wallMs ?? 0;
     // An unmeasured row contributes nothing and does not turn the total into
     // a number on its own — same as costUsd immediately below.
     if (r.tokens !== null) tokens = (tokens ?? 0) + r.tokens;
@@ -261,7 +283,7 @@ export function completedTotals(rows: ProgressRow[]): {
     // a number on its own — three dashes must total a dash, not $0.00.
     if (r.costUsd !== null) costUsd = (costUsd ?? 0) + r.costUsd;
   }
-  return { elapsedMs, tokens, turns, costUsd };
+  return { elapsedMs, wallMs, tokens, turns, costUsd };
 }
 
 /**

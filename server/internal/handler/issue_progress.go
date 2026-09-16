@@ -44,14 +44,21 @@ type IssueProgressTokens struct {
 }
 
 type IssueProgressTask struct {
-	TaskID      string              `json:"task_id"`
-	AgentName   string              `json:"agent_name"`
-	Status      string              `json:"status"`
-	QueuedAt    time.Time           `json:"queued_at"`
-	StartedAt   *time.Time          `json:"started_at"`
-	CompletedAt *time.Time          `json:"completed_at"`
-	Tokens      IssueProgressTokens `json:"tokens"`
-	Turns       int64               `json:"turns"`
+	TaskID    string    `json:"task_id"`
+	AgentName string    `json:"agent_name"`
+	Status    string    `json:"status"`
+	QueuedAt  time.Time `json:"queued_at"`
+	// DispatchedAt is the instant the fork fired the webhook — the left end
+	// of the popover's wall-time span (dispatched_at → completed_at), which
+	// is the time the pipeline spent on the step: the GitHub queue, the
+	// runner's setup, the agent, and the step-finalizer. StartedAt cannot
+	// anchor that span, because the runner posts /start fifteen steps into
+	// its job. nil (null on the wire) for a task that was never dispatched.
+	DispatchedAt *time.Time          `json:"dispatched_at"`
+	StartedAt    *time.Time          `json:"started_at"`
+	CompletedAt  *time.Time          `json:"completed_at"`
+	Tokens       IssueProgressTokens `json:"tokens"`
+	Turns        int64               `json:"turns"`
 	// CostUSD is the STORED cost of the step — the streamer prices each run
 	// from the engine's rate table — summed over the step's task_usage rows.
 	// nil (null on the wire) when no row carried a cost; never 0 for that,
@@ -168,12 +175,13 @@ func maxTurnsFromCustomArgs(raw []byte) int64 {
 // database — the sentinel handling in particular.
 func progressTaskFromRow(row db.ListTaskProgressByIssueRow) IssueProgressTask {
 	return IssueProgressTask{
-		TaskID:      uuidToString(row.TaskID),
-		AgentName:   row.AgentName,
-		Status:      row.Status,
-		QueuedAt:    row.CreatedAt.Time,
-		StartedAt:   timestampPtr(row.StartedAt),
-		CompletedAt: timestampPtr(row.CompletedAt),
+		TaskID:       uuidToString(row.TaskID),
+		AgentName:    row.AgentName,
+		Status:       row.Status,
+		QueuedAt:     row.CreatedAt.Time,
+		DispatchedAt: timestampPtr(row.DispatchedAt),
+		StartedAt:    timestampPtr(row.StartedAt),
+		CompletedAt:  timestampPtr(row.CompletedAt),
 		Tokens: IssueProgressTokens{
 			Input:         row.InputTokens,
 			Output:        row.OutputTokens,
