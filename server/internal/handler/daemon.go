@@ -2798,6 +2798,17 @@ func (h *Handler) ExtendTaskPrepareLease(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, taskToResponse(*updated, taskWorkspaceID))
 }
 
+// TaskStartRequest is the optional body of POST /tasks/{id}/start.
+type TaskStartRequest struct {
+	// StartupMs is how long the caller had been executing before it posted
+	// /start — the GitHub runner measures it from its job's first step, so
+	// the span covers checkout, config, binaries and the fork clone. A
+	// duration rather than a timestamp: the runner's clock is not trusted,
+	// and the server derives job_started_at on its own clock. Omitted (the
+	// daemon, an older runner) or negative means "not measured".
+	StartupMs *int64 `json:"startup_ms"`
+}
+
 // StartTask marks a dispatched task as running.
 func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
@@ -2808,7 +2819,16 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.TaskService.StartTask(r.Context(), parseUUID(taskID))
+	var req TaskStartRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+	startupMs := startupMsFromRequest(req)
+
+	task, err := h.TaskService.StartTask(r.Context(), parseUUID(taskID), startupMs)
 	if err != nil {
 		slog.Warn("start task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -2817,6 +2837,18 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("task started", "task_id", taskID, "agent_id", uuidToString(task.AgentID))
 	writeJSON(w, http.StatusOK, taskToResponse(*task, workspaceID))
+}
+
+// startupMsFromRequest is the one place the wire value becomes a
+// measurement. A negative startup is not a measurement (a runner whose
+// clock stepped backwards mid-job), and storing it would put job_started_at
+// AFTER started_at — the exact inversion the duration-not-timestamp design
+// exists to rule out — so it is dropped rather than clamped.
+func startupMsFromRequest(req TaskStartRequest) *int64 {
+	if req.StartupMs == nil || *req.StartupMs < 0 {
+		return nil
+	}
+	return req.StartupMs
 }
 
 // TaskWaitLocalDirectoryRequest is the body the daemon POSTs when it parks

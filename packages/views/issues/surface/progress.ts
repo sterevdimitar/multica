@@ -66,13 +66,17 @@ export interface ProgressRow {
    */
   elapsedMs: number | null;
   /**
-   * Summed completed_at − dispatched_at over members that have both: the
-   * time the PIPELINE spent on the step — the GitHub queue, the runner's
-   * setup, the agent, the step-finalizer — where elapsedMs is only the
-   * agent's share of it. The anchor falls back to started_at when
-   * dispatched_at is missing (an older server), so wallMs is never less
-   * than elapsedMs on the same row. null when no member has a span; a live
-   * or queued member contributes nothing, exactly as for elapsedMs.
+   * Summed completed_at − job_started_at over members that have both: the
+   * time the PIPELINE spent EXECUTING the step — the runner's setup, the
+   * agent, the step-finalizer — where elapsedMs is only the agent's share
+   * of it. NOT the GitHub queue: between the webhook (dispatched_at) and
+   * the runner picking the job up nothing is running, and a wall that
+   * counted it would grow with the queue rather than with the work. The
+   * anchor falls back to started_at when job_started_at is missing (an
+   * older server, a daemon-run task), so wallMs is never less than
+   * elapsedMs on the same row. null when no member has a span — a member
+   * that never reached a runner contributes nothing; so does a live or
+   * queued one, exactly as for elapsedMs.
    */
   wallMs: number | null;
   /** started_at of the live member, the timer anchor. null when not live. */
@@ -217,9 +221,11 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
     const span = spanMs(t.started_at, t.completed_at);
     if (span !== null) row.elapsedMs = (row.elapsedMs ?? 0) + span;
     // Wire data, read defensively like failure_reason: a server that
-    // predates dispatched_at omits it, and the wall then anchors on
+    // predates job_started_at omits it, and the wall then anchors on
     // started_at — equal to elapsed, never absent and never below it.
-    const wallAnchor = typeof t.dispatched_at === "string" ? t.dispatched_at : t.started_at;
+    // dispatched_at is deliberately NOT a fallback: it would put the queue
+    // back into the number on exactly the rows that never ran.
+    const wallAnchor = typeof t.job_started_at === "string" ? t.job_started_at : t.started_at;
     const wall = spanMs(wallAnchor, t.completed_at);
     if (wall !== null) row.wallMs = (row.wallMs ?? 0) + wall;
 
@@ -256,8 +262,9 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
  */
 export function completedTotals(rows: ProgressRow[]): {
   elapsedMs: number;
-  /** The pipeline's time over the same rows — dispatched → completed per
-   *  step, summed. Rendered in front of elapsedMs in the footer. */
+  /** The pipeline's time over the same rows — job start → completed per
+   *  step, summed; queue excluded. Rendered in front of elapsedMs in the
+   *  footer. */
   wallMs: number;
   /** Sum of the measured completed rows; null when none reported tokens —
    *  same rule as costUsd: three dashes must total a dash, not 0. */

@@ -183,18 +183,23 @@ ORDER BY total_seconds DESC;
 -- turn budget retroactively changes the denominator on historical rows. The
 -- alternative is a per-task column and a migration, which is not worth it for
 -- a display number.
--- dispatched_at is the left end of the popover's wall-time span
--- (dispatched_at -> completed_at): the instant the fork fired the webhook.
--- started_at cannot serve — the runner posts /start well into its job, after
--- the GitHub queue and its own setup — so a total built on it misses the
--- startup a person is actually waiting through.
+-- job_started_at is the left end of the popover's wall-time span
+-- (job_started_at -> completed_at): the instant the runner's job began
+-- executing. started_at cannot serve — the runner posts /start well into
+-- its job, after its own setup — so a total built on it misses the startup
+-- a person is actually waiting through. dispatched_at cannot serve either:
+-- from the webhook to the runner picking the job up is the GitHub queue,
+-- during which nothing executes, and a wall that counts it measures the
+-- queue's mood, not the pipeline. dispatched_at is still carried so the
+-- client can fall back to it if it ever wants the queue, and for the
+-- older-server case where job_started_at does not exist.
 -- failure_reason is carried so a failed step can say WHY on the board. The
 -- turn count cannot: `--max-turns` counts tool-use turns only while the
 -- reported num_turns also counts the final text turn, so a run that stopped
 -- exactly at its budget reads as over it and a healthy run can too. The
 -- reason is the run's own word for what happened.
 SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
-       atq.created_at, atq.dispatched_at, atq.started_at, atq.completed_at,
+       atq.created_at, atq.dispatched_at, atq.job_started_at, atq.started_at, atq.completed_at,
        atq.failure_reason,
        a.custom_args AS agent_custom_args,
        COALESCE(SUM(tu.input_tokens), 0)::bigint       AS input_tokens,
@@ -213,7 +218,7 @@ FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 LEFT JOIN task_usage tu ON tu.task_id = atq.id
 WHERE atq.issue_id = $1
-GROUP BY atq.id, a.name, a.custom_args, atq.status, atq.created_at, atq.dispatched_at, atq.started_at, atq.completed_at, atq.failure_reason
+GROUP BY atq.id, a.name, a.custom_args, atq.status, atq.created_at, atq.dispatched_at, atq.job_started_at, atq.started_at, atq.completed_at, atq.failure_reason
 ORDER BY COALESCE(atq.started_at, atq.created_at) ASC;
 
 -- name: GetAutopilotAssigneeForIssue :one

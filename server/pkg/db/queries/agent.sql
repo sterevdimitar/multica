@@ -600,9 +600,17 @@ RETURNING *;
 -- the lock was acquired the daemon flips here). wait_reason is cleared on
 -- the transition so a future read can't conflate "currently waiting" with
 -- "previously waited".
+--
+-- startup_ms is how long the caller had already been executing when it
+-- posted /start — the runner measures it from its job's first step. It is a
+-- duration, not a timestamp, so the runner's clock never enters this table:
+-- job_started_at is derived on this server's clock and cannot exceed
+-- started_at. NULL (the daemon, an older runner) leaves job_started_at NULL,
+-- and the progress projection then anchors the wall on started_at.
 UPDATE agent_task_queue
 SET status = 'running',
     started_at = now(),
+    job_started_at = now() - make_interval(secs => sqlc.narg('startup_ms')::bigint / 1000.0),
     wait_reason = NULL,
     prepare_lease_expires_at = NULL
 WHERE id = $1 AND status IN ('dispatched', 'waiting_local_directory')

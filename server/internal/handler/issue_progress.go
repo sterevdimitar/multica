@@ -48,13 +48,21 @@ type IssueProgressTask struct {
 	AgentName string    `json:"agent_name"`
 	Status    string    `json:"status"`
 	QueuedAt  time.Time `json:"queued_at"`
-	// DispatchedAt is the instant the fork fired the webhook — the left end
-	// of the popover's wall-time span (dispatched_at → completed_at), which
-	// is the time the pipeline spent on the step: the GitHub queue, the
-	// runner's setup, the agent, and the step-finalizer. StartedAt cannot
-	// anchor that span, because the runner posts /start fifteen steps into
-	// its job. nil (null on the wire) for a task that was never dispatched.
-	DispatchedAt *time.Time          `json:"dispatched_at"`
+	// DispatchedAt is the instant the fork fired the webhook. Carried for
+	// the client; it is NOT the wall anchor — see JobStartedAt. nil (null on
+	// the wire) for a task that was never dispatched.
+	DispatchedAt *time.Time `json:"dispatched_at"`
+	// JobStartedAt is the instant the runner's job began executing — the
+	// left end of the popover's wall-time span (job_started_at →
+	// completed_at), which is the time the pipeline spent EXECUTING the
+	// step: the runner's setup, the agent, and the step-finalizer. It is
+	// derived on this server's clock from the startup_ms the runner reports
+	// to /start, so it is never later than StartedAt. What it excludes is
+	// the GitHub queue between DispatchedAt and itself — nothing is running
+	// then. nil (null on the wire) for a task that never reached a runner,
+	// or was started by a caller that reports no startup (the daemon); the
+	// client then anchors on StartedAt.
+	JobStartedAt *time.Time          `json:"job_started_at"`
 	StartedAt    *time.Time          `json:"started_at"`
 	CompletedAt  *time.Time          `json:"completed_at"`
 	Tokens       IssueProgressTokens `json:"tokens"`
@@ -180,6 +188,7 @@ func progressTaskFromRow(row db.ListTaskProgressByIssueRow) IssueProgressTask {
 		Status:       row.Status,
 		QueuedAt:     row.CreatedAt.Time,
 		DispatchedAt: timestampPtr(row.DispatchedAt),
+		JobStartedAt: timestampPtr(row.JobStartedAt),
 		StartedAt:    timestampPtr(row.StartedAt),
 		CompletedAt:  timestampPtr(row.CompletedAt),
 		Tokens: IssueProgressTokens{

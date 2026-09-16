@@ -808,7 +808,7 @@ func TestStartTaskCancelsPromotedFallbackBeforeAssigneeCanClaim(t *testing.T) {
 		t.Fatalf("queued assignee fallback before parent start = %d, want 1", got)
 	}
 
-	if _, err := testHandler.TaskService.StartTask(ctx, primary.ID); err != nil {
+	if _, err := testHandler.TaskService.StartTask(ctx, primary.ID, nil); err != nil {
 		t.Fatalf("start parent task: %v", err)
 	}
 

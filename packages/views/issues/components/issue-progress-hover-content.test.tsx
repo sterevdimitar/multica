@@ -300,7 +300,7 @@ describe("IssueProgressHoverContent", () => {
     expect(readinessRow.className).toContain("text-muted-foreground");
     expect(screen.getByText("Step 2 of 2")).toBeTruthy();
     // The Elapsed cell leads with the pipeline's wall time; these fixtures
-    // carry no dispatched_at, so it falls back to the agents' time and the
+    // carry no job_started_at, so it falls back to the agents' time and the
     // number appears twice. That is the skew path working, not a bug.
     const footer = Array.from(document.querySelectorAll("tfoot td")).map((td) => td.textContent);
     expect(footer).toEqual(["Completed", "6:26 6:26", "247k", "$0.06", "23"]);
@@ -348,8 +348,9 @@ describe("IssueProgressHoverContent", () => {
           task_id: "t1",
           agent_name: "review-agent",
           status: "completed",
-          queued_at: "2026-08-22T10:00:00Z",
-          dispatched_at: "2026-08-22T10:00:00Z",
+          queued_at: "2026-08-22T09:58:00Z",
+          dispatched_at: "2026-08-22T09:58:00Z", // 2 min in the queue: not shown
+          job_started_at: "2026-08-22T10:00:00Z",
           started_at: "2026-08-22T10:00:30Z",
           completed_at: "2026-08-22T10:02:00Z",
           tokens: tokens(100, 50, 25, 900),
@@ -366,9 +367,10 @@ describe("IssueProgressHoverContent", () => {
 
     renderContent(<IssueProgressHoverContent issueId="i1" />);
 
-    // Wall (webhook sent → /complete received) first, then the agent's own
+    // Wall (job picked up → /complete received) first, then the agent's own
     // time; one row, no label — the reader who opened the popover knows
     // which is which, and the 30 s between them is startup, not agent work.
+    // The two minutes the job sat in the GitHub queue are in neither.
     const footer = Array.from(document.querySelectorAll("tfoot td")).map((td) => td.textContent);
     expect(footer).toEqual(["Completed", "2:00 1:30", "175", "<$0.01", "4"]);
     expect(document.querySelectorAll("tfoot tr")).toHaveLength(1);

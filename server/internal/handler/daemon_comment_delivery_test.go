@@ -297,7 +297,7 @@ func TestClaimTaskByRuntime_CoalescedDeliveryMatrix(t *testing.T) {
 			t.Fatalf("database receipt does not match embedded comments")
 		}
 
-		if _, err := testHandler.TaskService.StartTask(context.Background(), parseUUID(fixture.taskID)); err != nil {
+		if _, err := testHandler.TaskService.StartTask(context.Background(), parseUUID(fixture.taskID), nil); err != nil {
 			t.Fatalf("start claimed task: %v", err)
 		}
 		if w := completeTaskViaHandler(t, fixture.taskID, "done"); w.Code != http.StatusOK {
@@ -542,7 +542,7 @@ func TestClaimTaskByRuntime_PayloadOverflowReceiptsOnlyEmbeddedPrefix(t *testing
 		t.Fatalf("overflow claim embedded comments beyond stable boundary: ids=%v comments=%d", task.CoalescedCommentIDs, len(task.CoalescedComments))
 	}
 
-	if _, err := testHandler.TaskService.StartTask(context.Background(), parseUUID(fixture.taskID)); err != nil {
+	if _, err := testHandler.TaskService.StartTask(context.Background(), parseUUID(fixture.taskID), nil); err != nil {
 		t.Fatalf("start overflow task: %v", err)
 	}
 	if w := completeTaskViaHandler(t, fixture.taskID, "done"); w.Code != http.StatusOK {
