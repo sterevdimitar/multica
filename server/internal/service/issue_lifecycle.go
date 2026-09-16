@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -440,4 +441,68 @@ func blockedReasonCommentBody(failureReason string) string {
 		"Classified as `%s`.\n\n@-mention an agent on this card to resume - it starts a new run and the card returns to in progress.",
 		safeReason,
 	)
+}
+
+// archiveSweepStatuses are the statuses the archive sweeper ages out, in the
+// order it writes them. Terminal only: in_review and blocked are waiting on
+// a human, not finished, and never archive on age.
+var archiveSweepStatuses = []string{StatusDone, StatusCancelled}
+
+// ArchiveStaleTerminalIssues is the archive sweeper's one tick: every card,
+// across workspaces, that has sat in done or cancelled for longer than
+// olderThan moves to archived. It returns how many moved.
+//
+// Two statements, not one. UPDATE … RETURNING cannot carry the previous
+// status the broadcast needs, so the sweeper selects first and then writes
+// one guarded UPDATE per previous status (ArchiveIssuesIfStatus's
+// status = current_status clause). A card a human drags out between the two
+// statements matches no row in the write: it is neither archived nor
+// announced with a stale prev_status. That is the race, not an error.
+//
+// The sweeper reads nothing but status and age — not the assignee, not the
+// task queue, not the pull request. A cancelled card whose PR is still open
+// archives after olderThan like any other; that is the rule. The assignee is
+// kept, as on every status write except park; an archived card cannot wake
+// on it because the inert checks (WillEnqueueRun, computeCommentAgentTriggers)
+// run ahead of every assignee lookup. No comment is posted: one per card is
+// noise in an archive, and archived cards do not wake on comments anyway.
+//
+// Never panics and never fails the server: a query error is logged and the
+// tick returns what it managed to move.
+func (s *TaskService) ArchiveStaleTerminalIssues(ctx context.Context, olderThan time.Duration) int {
+	if olderThan <= 0 {
+		return 0
+	}
+	stale, err := s.Queries.ListStaleTerminalIssues(ctx, pgtype.Interval{Microseconds: olderThan.Microseconds(), Valid: true})
+	if err != nil {
+		slog.Error("archive sweeper: list stale terminal issues", "err", err, "older_than", olderThan.String())
+		return 0
+	}
+	if len(stale) == 0 {
+		return 0
+	}
+	idsByStatus := map[string][]pgtype.UUID{}
+	for _, iss := range stale {
+		idsByStatus[iss.Status] = append(idsByStatus[iss.Status], iss.ID)
+	}
+	moved := 0
+	for _, prev := range archiveSweepStatuses {
+		ids := idsByStatus[prev]
+		if len(ids) == 0 {
+			continue
+		}
+		archived, err := s.Queries.ArchiveIssuesIfStatus(ctx, db.ArchiveIssuesIfStatusParams{Ids: ids, CurrentStatus: prev})
+		if err != nil {
+			slog.Error("archive sweeper: archive issues", "err", err, "prev_status", prev, "candidates", len(ids))
+			continue
+		}
+		for _, iss := range archived {
+			s.broadcastIssueUpdated(iss, prev)
+		}
+		moved += len(archived)
+	}
+	if moved > 0 {
+		slog.Info("archive sweeper: archived stale terminal issues", "moved", moved, "candidates", len(stale), "older_than", olderThan.String())
+	}
+	return moved
 }

@@ -386,6 +386,12 @@ func main() {
 
 	// Start background sweeper to mark stale runtimes as offline.
 	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus)
+	// Archive sweeper: a card in done/cancelled for ISSUE_ARCHIVE_AFTER moves
+	// to archived. ISSUE_ARCHIVE_SWEEP_ENABLED=false keeps the status without
+	// the clock.
+	if envBool("ISSUE_ARCHIVE_SWEEP_ENABLED", true) {
+		go runIssueArchiveSweeper(sweepCtx, taskSvc, envDuration("ISSUE_ARCHIVE_AFTER", 72*time.Hour))
+	}
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
 	go runDBStatsLogger(sweepCtx, pool)
