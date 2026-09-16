@@ -37,6 +37,18 @@ type AppConfig struct {
 	DaemonServerURL string `json:"daemon_server_url,omitempty"`
 	DaemonAppURL    string `json:"daemon_app_url,omitempty"`
 
+	// Webhook-runtime bring-up values the "Add a computer" dialog renders
+	// into commands: where the dispatch service listens, the event type it
+	// expects, and the repository + path holding the self-hosted runner
+	// files. Deployment-level and non-secret (an internal hostname, an
+	// event name, a repository, a path); this endpoint is public, so
+	// nothing else may go here — the webhook secret in particular stays
+	// a placeholder the user types.
+	WebhookRuntimeDispatchURL string `json:"webhook_runtime_dispatch_url,omitempty"`
+	WebhookRuntimeEventType   string `json:"webhook_runtime_event_type,omitempty"`
+	WebhookRuntimeRunnerRepo  string `json:"webhook_runtime_runner_repo,omitempty"`
+	WebhookRuntimeRunnerPath  string `json:"webhook_runtime_runner_path,omitempty"`
+
 	// PostHog public config for the frontend. The key is the same Project
 	// API Key the backend uses; returning it here (instead of baking it
 	// into the frontend bundle via NEXT_PUBLIC_*) means self-hosted
@@ -73,6 +85,10 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	config.CdnSigned = h.CFSigner != nil
 	config.DaemonServerURL, config.DaemonAppURL = daemonSetupURLsFromEnv()
+	config.WebhookRuntimeDispatchURL = os.Getenv("WEBHOOK_RUNTIME_DISPATCH_URL")
+	config.WebhookRuntimeEventType = os.Getenv("WEBHOOK_RUNTIME_EVENT_TYPE")
+	config.WebhookRuntimeRunnerRepo = os.Getenv("WEBHOOK_RUNTIME_RUNNER_REPO")
+	config.WebhookRuntimeRunnerPath = os.Getenv("WEBHOOK_RUNTIME_RUNNER_PATH")
 	config.FeatureFlags = featureflags.EvaluateFrontendPublicFlags(r.Context(), h.FeatureFlags)
 	// Only surface the build version on self-hosted deployments. The managed
 	// cloud is continuously deployed and its users can't choose the build, so

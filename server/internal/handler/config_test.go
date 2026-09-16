@@ -393,3 +393,67 @@ func TestGetConfigExposesFrontendFeatureFlags(t *testing.T) {
 		t.Fatalf("composio_mcp_apps: want true with flag enabled, got false")
 	}
 }
+
+func TestGetConfigIncludesWebhookRuntimeSetup(t *testing.T) {
+	t.Setenv("WEBHOOK_RUNTIME_DISPATCH_URL", "http://translator:8090/v1/dispatch")
+	t.Setenv("WEBHOOK_RUNTIME_EVENT_TYPE", "multica-task")
+	t.Setenv("WEBHOOK_RUNTIME_RUNNER_REPO", "acme/pipeline")
+	t.Setenv("WEBHOOK_RUNTIME_RUNNER_PATH", "deployment/local-runner")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	w := httptest.NewRecorder()
+
+	testHandler.GetConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetConfig: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var cfg AppConfig
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	// Verbatim: the frontend builds the runs_on URL and tolerates a
+	// trailing slash itself; the server does not normalise operator input.
+	if cfg.WebhookRuntimeDispatchURL != "http://translator:8090/v1/dispatch" {
+		t.Fatalf("webhook_runtime_dispatch_url: got %q", cfg.WebhookRuntimeDispatchURL)
+	}
+	if cfg.WebhookRuntimeEventType != "multica-task" {
+		t.Fatalf("webhook_runtime_event_type: got %q", cfg.WebhookRuntimeEventType)
+	}
+	if cfg.WebhookRuntimeRunnerRepo != "acme/pipeline" {
+		t.Fatalf("webhook_runtime_runner_repo: got %q", cfg.WebhookRuntimeRunnerRepo)
+	}
+	if cfg.WebhookRuntimeRunnerPath != "deployment/local-runner" {
+		t.Fatalf("webhook_runtime_runner_path: got %q", cfg.WebhookRuntimeRunnerPath)
+	}
+}
+
+func TestGetConfigOmitsWebhookRuntimeSetupWhenUnset(t *testing.T) {
+	t.Setenv("WEBHOOK_RUNTIME_DISPATCH_URL", "")
+	t.Setenv("WEBHOOK_RUNTIME_EVENT_TYPE", "")
+	t.Setenv("WEBHOOK_RUNTIME_RUNNER_REPO", "")
+	t.Setenv("WEBHOOK_RUNTIME_RUNNER_PATH", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	w := httptest.NewRecorder()
+
+	testHandler.GetConfig(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetConfig: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	for _, key := range []string{
+		"webhook_runtime_dispatch_url",
+		"webhook_runtime_event_type",
+		"webhook_runtime_runner_repo",
+		"webhook_runtime_runner_path",
+	} {
+		if _, present := raw[key]; present {
+			t.Fatalf("%s: want omitted when unset, got %v", key, raw[key])
+		}
+	}
+}
