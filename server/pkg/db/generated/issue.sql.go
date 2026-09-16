@@ -1368,14 +1368,35 @@ UPDATE issue SET
     priority = COALESCE($5, priority),
     assignee_type = $6,
     assignee_id = $7,
-    position = COALESCE($8, position),
+    -- Top-of-column on status change. Three arms, first match wins:
+    --   1. an explicit position (the board's drag sends one) is honoured;
+    --   2. a status write that actually changes the status computes
+    --      MIN(position) - 1 over the TARGET (workspace, status) column -
+    --      the same rule CreateIssue uses via issueposition.NextTopPosition -
+    --      so the card lands at the top of the column it is entering;
+    --   3. anything else leaves position alone.
+    -- ` + "`" + `status` + "`" + ` on the left of IS DISTINCT FROM is the row's PRE-update value:
+    -- Postgres evaluates SET expressions against the old row, which is what
+    -- lets a single UPDATE decide "did it move" atomically with the write.
+    -- The six UpdateIssueStatus* queries below carry arm 2 only (they take
+    -- no position) and point back here. The casts pin sqlc's inference so
+    -- the generated Params keep pgtype.Float8 / pgtype.Text.
+    position = CASE
+        WHEN $8::float8 IS NOT NULL THEN $8::float8
+        WHEN $4::text IS NOT NULL
+         AND $4::text IS DISTINCT FROM status THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $4::text)
+        ELSE position
+    END,
     start_date = $9,
     due_date = $10,
     parent_issue_id = $11,
     project_id = $12,
     stage = $13,
     updated_at = now()
-WHERE id = $1
+WHERE issue.id = $1
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
@@ -1446,8 +1467,16 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 const updateIssueStatus = `-- name: UpdateIssueStatus :one
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3
+WHERE issue.id = $1 AND issue.workspace_id = $3
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
@@ -1495,10 +1524,18 @@ func (q *Queries) UpdateIssueStatus(ctx context.Context, arg UpdateIssueStatusPa
 const updateIssueStatusAndAssign = `-- name: UpdateIssueStatusAndAssign :one
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     assignee_type = $3,
     assignee_id = $4,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $5
+WHERE issue.id = $1 AND issue.workspace_id = $5
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
@@ -1561,10 +1598,18 @@ func (q *Queries) UpdateIssueStatusAndAssign(ctx context.Context, arg UpdateIssu
 const updateIssueStatusAndUnassign = `-- name: UpdateIssueStatusAndUnassign :one
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     assignee_type = NULL,
     assignee_id = NULL,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3
+WHERE issue.id = $1 AND issue.workspace_id = $3
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
@@ -1619,10 +1664,18 @@ func (q *Queries) UpdateIssueStatusAndUnassign(ctx context.Context, arg UpdateIs
 const updateIssueStatusAndUnassignIfCurrent = `-- name: UpdateIssueStatusAndUnassignIfCurrent :one
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     assignee_type = NULL,
     assignee_id = NULL,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3 AND status = ANY($4::text[])
+WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY($4::text[])
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
@@ -1678,8 +1731,16 @@ func (q *Queries) UpdateIssueStatusAndUnassignIfCurrent(ctx context.Context, arg
 const updateIssueStatusIfCurrent = `-- name: UpdateIssueStatusIfCurrent :one
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     updated_at = now()
-WHERE id = $1 AND workspace_id = $3 AND status = ANY($4::text[])
+WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY($4::text[])
 RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties
 `
 
@@ -1745,6 +1806,14 @@ func (q *Queries) UpdateIssueStatusIfCurrent(ctx context.Context, arg UpdateIssu
 const updateIssueStatusIfCurrentAndInactive = `-- name: UpdateIssueStatusIfCurrentAndInactive :one
 UPDATE issue SET
     status = $2,
+    -- Top-of-column on status change; see UpdateIssue.
+    position = CASE
+        WHEN status IS DISTINCT FROM $2 THEN (
+            SELECT COALESCE(MIN(c.position), 0) - 1
+            FROM issue c
+            WHERE c.workspace_id = issue.workspace_id AND c.status = $2)
+        ELSE position
+    END,
     updated_at = now()
 WHERE issue.id = $1 AND issue.workspace_id = $3 AND issue.status = ANY($4::text[])
   AND NOT EXISTS (
