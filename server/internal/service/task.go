@@ -1789,7 +1789,7 @@ func (s *TaskService) CancelTaskWithResult(ctx context.Context, taskID pgtype.UU
 	// and the row waits for the queued-TTL sweeper to expire it (card 239,
 	// 2026-09-14: a push restart cancelled the run ahead of a queued
 	// conflict-agent summon).
-	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
+	s.DrainWebhookQueue(ctx)
 
 	return &CancelTaskResult{
 		Task:                 task,
@@ -2794,7 +2794,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 
 	// Drain the webhook queue: if this agent has capacity, dispatch the
 	// next queued task so the queue doesn't stall until the next enqueue.
-	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
+	s.DrainWebhookQueue(ctx)
 
 	return &task, nil
 }
@@ -3217,7 +3217,7 @@ func (s *TaskService) FailTaskWithOutput(ctx context.Context, taskID pgtype.UUID
 
 	// Drain the webhook queue: capacity just freed up, dispatch the next
 	// queued task if one exists.
-	s.MaybeDispatchNextQueuedWebhookTask(ctx, task.AgentID)
+	s.DrainWebhookQueue(ctx)
 
 	return &task, nil
 }

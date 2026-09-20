@@ -523,7 +523,7 @@ func TestDispatchProceedsWhenTheStatusWriteFails(t *testing.T) {
 		t.Fatalf("load agent: %v", err)
 	}
 
-	svc.dispatchWebhookTask(ctx, task, runtime, agent)
+	svc.dispatchWebhookTask(ctx, task, runtime, agent, nil)
 
 	var taskStatus string
 	if err := pool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&taskStatus); err != nil {
@@ -572,7 +572,7 @@ func TestDispatchWritesInProgress(t *testing.T) {
 		t.Fatalf("load agent: %v", err)
 	}
 
-	svc.dispatchWebhookTask(ctx, task, runtime, agent)
+	svc.dispatchWebhookTask(ctx, task, runtime, agent, nil)
 
 	var issueStatus string
 	if err := pool.QueryRow(ctx, `SELECT status FROM issue WHERE id = $1`, issueID).Scan(&issueStatus); err != nil {
