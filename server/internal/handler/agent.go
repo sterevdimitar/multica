@@ -46,6 +46,11 @@ type AgentResponse struct {
 	RuntimeConfig any             `json:"runtime_config"`
 	CustomArgs    []string        `json:"custom_args"`
 	McpConfig     json.RawMessage `json:"mcp_config"`
+	// FallbackRuntimeIDs are the webhook runtimes this agent may fail over
+	// to when its own runtime is down (runtime placement, 2026-09-20).
+	// Written by the pipeline reconciler from agents.yaml, never by the UI;
+	// [] = pinned, the agent waits for its own runtime. Never null.
+	FallbackRuntimeIDs []string `json:"fallback_runtime_ids"`
 	// custom_env is intentionally NOT serialized on agent resources. The
 	// agent_list/get/create/update/archive/restore responses and WS events
 	// only expose coarse metadata (has_custom_env, custom_env_key_count) so
@@ -173,6 +178,7 @@ func agentToResponse(a db.Agent) AgentResponse {
 		Model:                    a.Model.String,
 		ThinkingLevel:            a.ThinkingLevel.String,
 		ComposioToolkitAllowlist: composioAllowlist,
+		FallbackRuntimeIDs:       append([]string{}, uuidsToStrings(a.FallbackRuntimeIds)...), // [] never null
 		OwnerID:                  uuidToPtr(a.OwnerID),
 		Skills:                   []AgentSkillSummary{},
 		CreatedAt:                timestampToString(a.CreatedAt),
@@ -1307,6 +1313,11 @@ type UpdateAgentRequest struct {
 	// null" (a *[]string can't, because a nil pointer is the same wire
 	// representation as both). MUL-3869.
 	ComposioToolkitAllowlist *[]string `json:"composio_toolkit_allowlist"`
+	// FallbackRuntimeIDs replaces the agent's failover set wholesale
+	// (runtime placement, 2026-09-20): omitted → unchanged; a list → every
+	// id must be a webhook runtime in the agent's workspace; [] pins the
+	// agent. The pipeline reconciler is the writer; the UI only reads.
+	FallbackRuntimeIDs *[]string `json:"fallback_runtime_ids"`
 }
 
 // workspaceAlwaysRedactSecrets reports whether the workspace has opted
@@ -1741,11 +1752,46 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// fallback_runtime_ids: validated before any write so a bad id cannot
+	// leave a half-applied PUT; written after UpdateAgent through its own
+	// query so [] is an unambiguous "pinned".
+	var fallbackIDs []pgtype.UUID
+	if req.FallbackRuntimeIDs != nil {
+		fallbackIDs = make([]pgtype.UUID, 0, len(*req.FallbackRuntimeIDs))
+		for _, raw := range *req.FallbackRuntimeIDs {
+			rid, err := util.ParseUUID(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid fallback_runtime_ids: "+raw)
+				return
+			}
+			rt, err := h.Queries.GetAgentRuntimeForWorkspace(r.Context(), db.GetAgentRuntimeForWorkspaceParams{
+				ID:          rid,
+				WorkspaceID: existing.WorkspaceID,
+			})
+			if err != nil || rt.RuntimeMode != "webhook" {
+				writeError(w, http.StatusBadRequest, "invalid fallback_runtime_ids: "+raw+" is not a webhook runtime in this workspace")
+				return
+			}
+			fallbackIDs = append(fallbackIDs, rid)
+		}
+	}
+
 	updated, err := h.Queries.UpdateAgent(r.Context(), params)
 	if err != nil {
 		slog.Warn("update agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to update agent: "+err.Error())
 		return
+	}
+	if req.FallbackRuntimeIDs != nil {
+		updated, err = h.Queries.SetAgentFallbackRuntimeIDs(r.Context(), db.SetAgentFallbackRuntimeIDsParams{
+			ID:  updated.ID,
+			Ids: fallbackIDs,
+		})
+		if err != nil {
+			slog.Warn("set agent fallback_runtime_ids failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+			writeError(w, http.StatusInternalServerError, "failed to set fallback_runtime_ids: "+err.Error())
+			return
+		}
 	}
 
 	// mcp_config / thinking_level: null/empty in the request means explicitly

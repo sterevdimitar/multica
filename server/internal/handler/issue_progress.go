@@ -85,6 +85,12 @@ type IssueProgressTask struct {
 	// so a run that stopped exactly at its budget reads as over it and so
 	// can a perfectly healthy one.
 	FailureReason string `json:"failure_reason"`
+	// RuntimeName is where the step ran (custom_name ?? name, "" when the
+	// runtime is gone) and OffHome whether that differs from the agent's
+	// current runtime — a failed-over run (runtime placement, 2026-09-20).
+	// The popover appends "· on CircleCI" to such a step.
+	RuntimeName string `json:"runtime_name"`
+	OffHome     bool   `json:"off_home"`
 }
 
 type IssueProgressResponse struct {
@@ -202,6 +208,9 @@ func progressTaskFromRow(row db.ListTaskProgressByIssueRow) IssueProgressTask {
 		MaxTurns:      maxTurnsFromCustomArgs(row.AgentCustomArgs),
 		IsLive:        liveTaskStatuses[row.Status],
 		FailureReason: row.FailureReason.String,
+		RuntimeName:   row.RuntimeName,
+		OffHome: row.RuntimeID.Valid && row.AgentRuntimeID.Valid &&
+			uuidToString(row.RuntimeID) != uuidToString(row.AgentRuntimeID),
 	}
 }
 
