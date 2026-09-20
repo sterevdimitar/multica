@@ -4,6 +4,8 @@
     "tagline": "为智能体跑 CLI 会话的机器和云端 worker。",
     "learn_more": "了解更多 →",
     "connect_remote": "添加电脑",
+    "placement_hint": "每个代理在自己的运行时上运行。当该运行时不可用时，其任务会转到此顺序中代理可用且有空闲槽位的第一个运行时。设为 0 会将运行时移出轮换；当所有运行时都已满时，任务会等待，直到有槽位空出再开始。",
+    "reorder_handle": "拖动以更改回退顺序（当前第 {{rank}} 位）",
     "search_placeholder": "搜索运行时...",
     "scope_mine": "我的",
     "scope_all": "全部",
@@ -38,6 +40,11 @@
     "section_remote": "远程",
     "section_cloud": "云端",
     "this_machine": "本机",
+    "placement": {
+      "running_of": "{{running}}/{{cap}} 运行中",
+      "running": "{{running}} 运行中",
+      "checked": "检查于 {{when}}"
+    },
     "local_badge": "本地 · 这台机器",
     "pending_custom_runtimes": "待注册自定义运行时",
     "runtime_count_other": "{{count}} 个运行时",

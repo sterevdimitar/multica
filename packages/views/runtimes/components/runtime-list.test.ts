@@ -70,4 +70,19 @@ describe("buildWorkloadIndex", () => {
       queuedCount: 0,
     });
   });
+
+  // Runtime placement (2026-09-20): a task is counted where it RUNS — by
+  // its own runtime_id — so a failed-over run shows on the fallback, and a
+  // dispatched task counts as running (what the cap counts).
+  it("counts a task under the task's runtime, not the agent's", () => {
+    const agent = makeAgent({ id: "agent-1", runtime_id: "home" });
+    const tasks = [
+      makeTask({ id: "t1", agent_id: "agent-1", runtime_id: "home", status: "running" }),
+      makeTask({ id: "t2", agent_id: "agent-1", runtime_id: "fallback", status: "dispatched" }),
+      makeTask({ id: "t3", agent_id: "agent-1", runtime_id: "home", status: "queued" }),
+    ];
+    const index = buildWorkloadIndex([agent], tasks);
+    expect(index.get("home")).toEqual({ agentIds: ["agent-1"], runningCount: 1, queuedCount: 1 });
+    expect(index.get("fallback")).toEqual({ agentIds: [], runningCount: 1, queuedCount: 0 });
+  });
 });

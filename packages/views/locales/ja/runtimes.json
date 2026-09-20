@@ -4,6 +4,8 @@
     "tagline": "エージェントの CLI セッションを実行するマシンとクラウドワーカーです。",
     "learn_more": "詳しく見る →",
     "connect_remote": "コンピュータを追加",
+    "placement_hint": "各エージェントは自分のランタイムで実行されます。そのランタイムがダウンしているときは、この順序でエージェントが使用でき、空きスロットのある最初のランタイムに実行が送られます。0 を設定するとランタイムはローテーションから外れます。すべてのランタイムが満杯のときは、実行は待機し、スロットが空くと開始します。",
+    "reorder_handle": "ドラッグしてフォールバック順を変更（現在 {{rank}} 番目）",
     "search_placeholder": "ランタイムを検索…",
     "scope_mine": "自分のもの",
     "scope_all": "すべて",
@@ -38,6 +40,11 @@
     "section_remote": "リモート",
     "section_cloud": "クラウド",
     "this_machine": "このデバイス",
+    "placement": {
+      "running_of": "{{running}}/{{cap}} 実行中",
+      "running": "{{running}} 実行中",
+      "checked": "確認: {{when}}"
+    },
     "local_badge": "ローカル · このマシン",
     "pending_custom_runtimes": "登録待ちのカスタムランタイム",
     "runtime_count_other": "ランタイム {{count}} 個",

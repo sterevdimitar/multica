@@ -4,6 +4,8 @@
     "tagline": "에이전트의 CLI 세션을 실행하는 기기와 클라우드 워커입니다.",
     "learn_more": "자세히 보기 →",
     "connect_remote": "컴퓨터 추가",
+    "placement_hint": "각 에이전트는 자기 런타임에서 실행됩니다. 그 런타임이 다운되면 실행은 이 순서에서 에이전트가 사용할 수 있고 빈 슬롯이 있는 첫 런타임으로 갑니다. 0은 런타임을 로테이션에서 제외합니다. 모든 런타임이 가득 차면 실행은 대기하다가 슬롯이 비면 시작합니다.",
+    "reorder_handle": "드래그하여 대체 순서 변경 (현재 {{rank}}번째)",
     "search_placeholder": "런타임 검색...",
     "scope_mine": "내 것",
     "scope_all": "전체",
@@ -38,6 +40,11 @@
     "section_remote": "원격",
     "section_cloud": "클라우드",
     "this_machine": "이 Mac",
+    "placement": {
+      "running_of": "{{running}}/{{cap}} 실행 중",
+      "running": "{{running}} 실행 중",
+      "checked": "확인 {{when}}"
+    },
     "local_badge": "로컬 · 이 기기",
     "pending_custom_runtimes": "등록 대기 중인 사용자 지정 런타임",
     "runtime_count_other": "런타임 {{count}}개",

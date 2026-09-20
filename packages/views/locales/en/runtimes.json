@@ -4,6 +4,8 @@
     "tagline": "Machines and cloud workers running CLI sessions for your agents.",
     "learn_more": "Learn more →",
     "connect_remote": "Add a computer",
+    "placement_hint": "Each agent runs on its own runtime. When that runtime is down, its runs go to the first runtime in this order that the agent may use and that has a free slot. 0 takes a runtime out of the rotation; when every runtime is full, a run waits and starts when a slot frees.",
+    "reorder_handle": "Drag to change the fallback order (currently {{rank}})",
     "search_placeholder": "Search runtimes…",
     "scope_mine": "Mine",
     "scope_all": "All",
@@ -38,6 +40,11 @@
     "section_remote": "Remote",
     "section_cloud": "Cloud",
     "this_machine": "This device",
+    "placement": {
+      "running_of": "{{running}}/{{cap}} running",
+      "running": "{{running}} running",
+      "checked": "checked {{when}}"
+    },
     "local_badge": "Local · this machine",
     "pending_custom_runtimes": "Pending custom runtimes",
     "runtime_count_one": "{{count}} runtime",

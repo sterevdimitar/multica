@@ -29,6 +29,16 @@ export interface RuntimeMachine {
   queuedCount: number;
   providerNames: string[];
   lastSeenAt: string | null;
+  /**
+   * Runtime placement (2026-09-20). A webhook machine hosts exactly one
+   * runtime, so these are that runtime's: its position in the fallback
+   * order (null for a daemon machine — never in the order), its cap (null =
+   * no limit), and why it is down when it is.
+   */
+  dispatchOrder: number | null;
+  maxConcurrentTasks: number | null;
+  downReason: string | null;
+  availabilityCheckedAt: string | null;
 }
 
 interface RuntimeMachineOptions {
@@ -148,6 +158,10 @@ function placeholderLocalMachine(
     queuedCount: 0,
     providerNames: [],
     lastSeenAt: null,
+    dispatchOrder: null,
+    maxConcurrentTasks: null,
+    downReason: null,
+    availabilityCheckedAt: null,
   };
 }
 
@@ -231,13 +245,16 @@ function finalizeRuntimeMachine(
   );
   const onlineCount = healthByRuntime.filter((h) => h === "online").length;
   const issueCount = runtimes.length - onlineCount;
+  // Seeded from the first runtime's own state rather than "recently_lost":
+  // a webhook machine that is out of the rotation must read as exactly
+  // that, not as a lost heartbeat of the same severity.
   const health =
     onlineCount > 0
       ? "online"
       : healthByRuntime.reduce<RuntimeHealth>(
           (worst, current) =>
             HEALTH_SEVERITY[current] > HEALTH_SEVERITY[worst] ? current : worst,
-          "recently_lost",
+          healthByRuntime[0] ?? "recently_lost",
         );
   const workload = runtimes.reduce(
     (sum, runtime) => {
@@ -269,7 +286,20 @@ function finalizeRuntimeMachine(
     queuedCount: workload.queuedCount,
     providerNames,
     lastSeenAt: latestLastSeenAt(runtimes),
+    dispatchOrder: webhookMachineOrder(runtimes),
+    maxConcurrentTasks: first?.max_concurrent_tasks ?? null,
+    downReason: first?.down_reason ?? null,
+    availabilityCheckedAt: first?.availability_checked_at ?? null,
   };
+}
+
+// The fallback order applies to webhook runtimes only. A machine whose
+// every runtime is webhook-mode takes the lowest of their orders (one, in
+// practice: a webhook machine is one registration); anything else is null
+// and sorts after every ordered machine.
+function webhookMachineOrder(runtimes: AgentRuntime[]): number | null {
+  if (runtimes.length === 0 || !runtimes.every((r) => r.runtime_mode === "webhook")) return null;
+  return Math.min(...runtimes.map((r) => r.dispatch_order ?? 0));
 }
 
 function runtimeMachineId(runtime: AgentRuntime): string {
@@ -421,12 +451,29 @@ function capitalize(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }
 
-function compareRuntimeMachines(a: RuntimeMachine, b: RuntimeMachine): number {
+export function compareRuntimeMachines(a: RuntimeMachine, b: RuntimeMachine): number {
   if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+  // Webhook machines come first, in the fallback order the user dragged
+  // (runtime placement, 2026-09-20): what the page shows is what the
+  // placement uses. Ties by registration, never by health — a runtime that
+  // is down keeps its place so the order stays legible.
+  const aOrdered = a.dispatchOrder != null;
+  const bOrdered = b.dispatchOrder != null;
+  if (aOrdered !== bOrdered) return aOrdered ? -1 : 1;
+  if (aOrdered && bOrdered && a.dispatchOrder !== b.dispatchOrder) {
+    return (a.dispatchOrder as number) - (b.dispatchOrder as number);
+  }
+  if (aOrdered && bOrdered) {
+    return earliestCreatedAt(a).localeCompare(earliestCreatedAt(b));
+  }
   const sectionDelta = sectionRank(a.section) - sectionRank(b.section);
   if (sectionDelta !== 0) return sectionDelta;
   if (a.onlineCount !== b.onlineCount) return b.onlineCount - a.onlineCount;
   return a.title.localeCompare(b.title);
+}
+
+function earliestCreatedAt(machine: RuntimeMachine): string {
+  return machine.runtimes.map((r) => r.created_at).sort()[0] ?? "";
 }
 
 function sectionRank(section: RuntimeMachineSection): number {
@@ -438,4 +485,47 @@ function sectionRank(section: RuntimeMachineSection): number {
     case "cloud":
       return 2;
   }
+}
+
+// The health cell's text for a webhook machine (runtime placement,
+// 2026-09-20): the label, then running/cap — or the down reason and when
+// the probe last checked. Exported for the machine detail page's list.
+export function webhookMachineHealthText(
+  machine: Pick<RuntimeMachine, "health" | "runningCount" | "maxConcurrentTasks" | "downReason" | "availabilityCheckedAt">,
+  label: string,
+  timeAgo: (iso: string) => string,
+  t: (sel: ($: { machine: { placement: { running_of: string; running: string; checked: string } } }) => string, opts?: Record<string, unknown>) => string,
+): { primary: string; secondary: string | null } {
+  if (machine.health === "down") {
+    const checked = machine.availabilityCheckedAt
+      ? t(($) => $.machine.placement.checked, { when: timeAgo(machine.availabilityCheckedAt) })
+      : null;
+    return { primary: `${label}${machine.downReason ? ` — ${machine.downReason}` : ""}`, secondary: checked };
+  }
+  if (machine.health === "out_of_rotation") {
+    return { primary: label, secondary: null };
+  }
+  const running =
+    machine.maxConcurrentTasks != null
+      ? t(($) => $.machine.placement.running_of, { running: machine.runningCount, cap: machine.maxConcurrentTasks })
+      : t(($) => $.machine.placement.running, { running: machine.runningCount });
+  return { primary: `${label} · ${running}`, secondary: null };
+}
+
+// The id list a drop writes: every webhook runtime of every ordered
+// machine, in the new order — or null when the drop changes nothing. The
+// server refuses a partial list, so the whole list goes every time.
+export function nextRuntimeOrder(
+  ordered: Pick<RuntimeMachine, "id" | "runtimes">[],
+  activeId: string,
+  overId: string,
+): string[] | null {
+  if (activeId === overId) return null;
+  const from = ordered.findIndex((m) => m.id === activeId);
+  const to = ordered.findIndex((m) => m.id === overId);
+  if (from < 0 || to < 0) return null;
+  const next = ordered.slice();
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved as (typeof ordered)[number]);
+  return next.flatMap((m) => m.runtimes.map((r) => r.id));
 }
