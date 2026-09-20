@@ -12,7 +12,7 @@ import (
 )
 
 const getAgentByNameInWorkspace = `-- name: GetAgentByNameInWorkspace :one
-SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key FROM agent WHERE workspace_id = $1 AND name = $2
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, fallback_runtime_ids FROM agent WHERE workspace_id = $1 AND name = $2
 `
 
 type GetAgentByNameInWorkspaceParams struct {
@@ -50,6 +50,7 @@ func (q *Queries) GetAgentByNameInWorkspace(ctx context.Context, arg GetAgentByN
 		&i.PermissionMode,
 		&i.Kind,
 		&i.SystemKey,
+		&i.FallbackRuntimeIds,
 	)
 	return i, err
 }
@@ -479,6 +480,11 @@ SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
        atq.created_at, atq.dispatched_at, atq.job_started_at, atq.started_at, atq.completed_at,
        atq.failure_reason,
        a.custom_args AS agent_custom_args,
+       -- The runtime the step ran on and the agent's own, so the popover can
+       -- say "on CircleCI" when they differ (runtime placement, 2026-09-20).
+       atq.runtime_id,
+       a.runtime_id AS agent_runtime_id,
+       COALESCE(rt.custom_name, rt.name, '')::text AS runtime_name,
        COALESCE(SUM(tu.input_tokens), 0)::bigint       AS input_tokens,
        COALESCE(SUM(tu.output_tokens), 0)::bigint      AS output_tokens,
        COALESCE(SUM(tu.cache_read_tokens), 0)::bigint  AS cache_read_tokens,
@@ -493,9 +499,10 @@ SELECT atq.id AS task_id, a.name AS agent_name, atq.status,
        COALESCE(MAX(tu.num_turns), 0)::bigint          AS num_turns
 FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
+LEFT JOIN agent_runtime rt ON rt.id = atq.runtime_id
 LEFT JOIN task_usage tu ON tu.task_id = atq.id
 WHERE atq.issue_id = $1
-GROUP BY atq.id, a.name, a.custom_args, atq.status, atq.created_at, atq.dispatched_at, atq.job_started_at, atq.started_at, atq.completed_at, atq.failure_reason
+GROUP BY atq.id, a.name, a.custom_args, a.runtime_id, rt.custom_name, rt.name, atq.status, atq.created_at, atq.dispatched_at, atq.job_started_at, atq.started_at, atq.completed_at, atq.failure_reason
 ORDER BY COALESCE(atq.started_at, atq.created_at) ASC
 `
 
@@ -510,6 +517,9 @@ type ListTaskProgressByIssueRow struct {
 	CompletedAt      pgtype.Timestamptz `json:"completed_at"`
 	FailureReason    pgtype.Text        `json:"failure_reason"`
 	AgentCustomArgs  []byte             `json:"agent_custom_args"`
+	RuntimeID        pgtype.UUID        `json:"runtime_id"`
+	AgentRuntimeID   pgtype.UUID        `json:"agent_runtime_id"`
+	RuntimeName      string             `json:"runtime_name"`
 	InputTokens      int64              `json:"input_tokens"`
 	OutputTokens     int64              `json:"output_tokens"`
 	CacheReadTokens  int64              `json:"cache_read_tokens"`
@@ -563,6 +573,9 @@ func (q *Queries) ListTaskProgressByIssue(ctx context.Context, issueID pgtype.UU
 			&i.CompletedAt,
 			&i.FailureReason,
 			&i.AgentCustomArgs,
+			&i.RuntimeID,
+			&i.AgentRuntimeID,
+			&i.RuntimeName,
 			&i.InputTokens,
 			&i.OutputTokens,
 			&i.CacheReadTokens,

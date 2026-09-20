@@ -412,3 +412,56 @@ WHERE status = 'offline'
   AND last_seen_at < now() - make_interval(secs => @stale_seconds::double precision)
   AND id NOT IN (SELECT DISTINCT runtime_id FROM agent)
 RETURNING id, workspace_id;
+
+-- ---------------------------------------------------------------------------
+-- Runtime placement (dev-command-center design 2026-09-20-runtime-placement):
+-- the cap, the fallback order and the measured availability of a webhook
+-- runtime. Migration 211.
+-- ---------------------------------------------------------------------------
+
+-- name: UpdateAgentRuntimeMaxConcurrentTasks :one
+-- Runs at once. NULL is a value here — "no limit" — so no COALESCE: the
+-- handler decides between omitted (no write) and null (clear) before calling.
+UPDATE agent_runtime
+SET max_concurrent_tasks = sqlc.narg(max_concurrent_tasks)::int, updated_at = now()
+WHERE id = $1
+RETURNING *;
+
+-- name: SetRuntimeDispatchOrder :exec
+-- Writes dispatch_order = position for every id in the list, in one
+-- statement. The handler has already checked the list is exactly the
+-- workspace's webhook runtimes; the workspace filter here is belt to that
+-- brace.
+UPDATE agent_runtime r
+SET dispatch_order = o.ord - 1, updated_at = now()
+FROM unnest(@ids::uuid[]) WITH ORDINALITY AS o(id, ord)
+WHERE r.id = o.id AND r.workspace_id = @workspace_id;
+
+-- name: ListWebhookRuntimesByOrder :many
+-- The fallback order: lower dispatch_order first, ties by registration.
+SELECT * FROM agent_runtime
+WHERE workspace_id = $1 AND runtime_mode = 'webhook'
+ORDER BY dispatch_order ASC, created_at ASC;
+
+-- name: ListAllWebhookRuntimes :many
+-- Every webhook runtime in every workspace — the availability probe's set.
+SELECT * FROM agent_runtime
+WHERE runtime_mode = 'webhook'
+ORDER BY workspace_id, dispatch_order ASC, created_at ASC;
+
+-- name: MarkRuntimeDown :exec
+UPDATE agent_runtime
+SET down_until = @down_until, down_reason = @down_reason, availability_checked_at = now(), updated_at = now()
+WHERE id = @id;
+
+-- name: MarkRuntimeUp :exec
+UPDATE agent_runtime
+SET down_until = NULL, down_reason = NULL, availability_checked_at = now(), updated_at = now()
+WHERE id = @id;
+
+-- name: CountRunningTasksOnRuntime :one
+-- running_on(r) from the design: what counts against a runtime's cap. Counts
+-- by the task's runtime_id — where the run actually went — not by the
+-- agent's, so a failed-over run is counted where it runs.
+SELECT count(*) FROM agent_task_queue
+WHERE runtime_id = $1 AND status IN ('dispatched', 'running');

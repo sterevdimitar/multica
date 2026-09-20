@@ -47,9 +47,10 @@ type Agent struct {
 	// Composio toolkit slugs this agent is allowed to mount as MCP. NULL or empty array = no MCP overlay. Mounted for any run that passes the agent invocation-permission gate (MUL-3963); the overlay uses the agent OWNER's active Composio connection, so sharing the agent (public_to) shares these apps with whoever may invoke it. No longer gated on originator == owner. Stored as TEXT[] so the dispatch path can intersect against the owner's active connections with a single SQL ANY() filter.
 	ComposioToolkitAllowlist []string `json:"composio_toolkit_allowlist"`
 	// Agent invocation permission mode (MUL-3963). private = owner only; public_to = allow-list in agent_invocation_target. Replaces visibility as the authorization source for triggering runs; visibility is now a derived legacy field. Default private = deny-by-default.
-	PermissionMode string      `json:"permission_mode"`
-	Kind           string      `json:"kind"`
-	SystemKey      pgtype.Text `json:"system_key"`
+	PermissionMode     string        `json:"permission_mode"`
+	Kind               string        `json:"kind"`
+	SystemKey          pgtype.Text   `json:"system_key"`
+	FallbackRuntimeIds []pgtype.UUID `json:"fallback_runtime_ids"`
 }
 
 // Allow-list of who may invoke a public_to agent (MUL-3963). One row per (agent, target_type, target); targets stack and canInvokeAgent OR-matches. workspace rows store the agent workspace_id in target_id; member rows store the user id; team rows are reserved and inert in V1. Rows only matter when agent.permission_mode = public_to. No DB foreign keys: agent_id / created_by / member target_id relationships are maintained in the application layer (see migration comment).
@@ -63,26 +64,31 @@ type AgentInvocationTarget struct {
 }
 
 type AgentRuntime struct {
-	ID               pgtype.UUID        `json:"id"`
-	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
-	DaemonID         pgtype.Text        `json:"daemon_id"`
-	Name             string             `json:"name"`
-	RuntimeMode      string             `json:"runtime_mode"`
-	Provider         string             `json:"provider"`
-	Status           string             `json:"status"`
-	DeviceInfo       string             `json:"device_info"`
-	Metadata         []byte             `json:"metadata"`
-	LastSeenAt       pgtype.Timestamptz `json:"last_seen_at"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
-	OwnerID          pgtype.UUID        `json:"owner_id"`
-	LegacyDaemonID   pgtype.Text        `json:"legacy_daemon_id"`
-	Visibility       string             `json:"visibility"`
-	ProfileID        pgtype.UUID        `json:"profile_id"`
-	CustomName       pgtype.Text        `json:"custom_name"`
-	WebhookUrl       pgtype.Text        `json:"webhook_url"`
-	WebhookSecret    pgtype.Text        `json:"webhook_secret"`
-	WebhookEventType pgtype.Text        `json:"webhook_event_type"`
+	ID                    pgtype.UUID        `json:"id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	DaemonID              pgtype.Text        `json:"daemon_id"`
+	Name                  string             `json:"name"`
+	RuntimeMode           string             `json:"runtime_mode"`
+	Provider              string             `json:"provider"`
+	Status                string             `json:"status"`
+	DeviceInfo            string             `json:"device_info"`
+	Metadata              []byte             `json:"metadata"`
+	LastSeenAt            pgtype.Timestamptz `json:"last_seen_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	OwnerID               pgtype.UUID        `json:"owner_id"`
+	LegacyDaemonID        pgtype.Text        `json:"legacy_daemon_id"`
+	Visibility            string             `json:"visibility"`
+	ProfileID             pgtype.UUID        `json:"profile_id"`
+	CustomName            pgtype.Text        `json:"custom_name"`
+	WebhookUrl            pgtype.Text        `json:"webhook_url"`
+	WebhookSecret         pgtype.Text        `json:"webhook_secret"`
+	WebhookEventType      pgtype.Text        `json:"webhook_event_type"`
+	MaxConcurrentTasks    pgtype.Int4        `json:"max_concurrent_tasks"`
+	DispatchOrder         int32              `json:"dispatch_order"`
+	DownUntil             pgtype.Timestamptz `json:"down_until"`
+	DownReason            pgtype.Text        `json:"down_reason"`
+	AvailabilityCheckedAt pgtype.Timestamptz `json:"availability_checked_at"`
 }
 
 type AgentSessionTranscript struct {
