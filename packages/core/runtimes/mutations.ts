@@ -58,8 +58,24 @@ export function useUpdateRuntime(wsId: string) {
         // Empty string clears the custom name; omit to leave unchanged.
         custom_name?: string;
         apply_to_machine?: boolean;
+        // Runs at once: null = no limit, 0 = out of the rotation; omit to
+        // leave unchanged (runtime placement, 2026-09-20).
+        max_concurrent_tasks?: number | null;
       };
     }) => api.updateRuntime(runtimeId, patch),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: runtimeKeys.all(wsId) });
+    },
+  });
+}
+
+// useReorderRuntimes writes the fallback order of the workspace's webhook
+// runtimes — the full id list in the new order (runtime placement,
+// 2026-09-20). Invalidates the runtime list so the ranks re-render.
+export function useReorderRuntimes(wsId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runtimeIds: string[]) => api.reorderRuntimes(wsId, runtimeIds),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: runtimeKeys.all(wsId) });
     },

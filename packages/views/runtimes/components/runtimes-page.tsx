@@ -4,10 +4,24 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronRight,
   Cloud,
+  GripVertical,
   Monitor,
   Plus,
   Server,
 } from "lucide-react";
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -15,6 +29,7 @@ import { useWorkspacePaths } from "@multica/core/paths";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import { runtimeProfileListOptions } from "@multica/core/runtimes";
 import { runtimeListOptions, runtimeKeys } from "@multica/core/runtimes/queries";
+import { useReorderRuntimes } from "@multica/core/runtimes/mutations";
 import { useWSEvent } from "@multica/core/realtime";
 import { agentListOptions } from "@multica/core/workspace/queries";
 import { Button } from "@multica/ui/components/ui/button";
@@ -31,7 +46,12 @@ import { CloudRuntimeDialog } from "./cloud-runtime-dialog";
 import { ProviderLogo } from "./provider-logo";
 import { buildWorkloadIndex, RuntimeList } from "./runtime-list";
 import { pendingRuntimeFromProfile } from "./pending-runtime";
-import { buildRuntimeMachines, type RuntimeMachine } from "./runtime-machines";
+import {
+  buildRuntimeMachines,
+  nextRuntimeOrder,
+  webhookMachineHealthText,
+  type RuntimeMachine,
+} from "./runtime-machines";
 import { HealthDot, HealthIcon, useHealthLabel } from "./shared";
 import { useT, useTimeAgo } from "../../i18n";
 import { daemonRuntimesDocsHref } from "./runtime-docs";
@@ -123,6 +143,8 @@ export function RuntimesPage({
     });
   }, [machines, runtimeProfiles]);
 
+  const { t } = useT("runtimes");
+
   if (isAuthLoading || runtimesLoading || profilesLoading) {
     return <RuntimesPageSkeleton />;
   }
@@ -149,6 +171,14 @@ export function RuntimesPage({
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto flex w-full max-w-[1440px] flex-col p-4 sm:p-6">
+            {machines.some((m) => m.dispatchOrder != null) && (
+              <p
+                data-testid="placement-hint"
+                className="mb-3 text-xs leading-relaxed text-muted-foreground"
+              >
+                {t(($) => $.page.placement_hint)}
+              </p>
+            )}
             {(machines.length > 0 || bootstrapping) && (
               <MachineList
                 machines={machines}
@@ -273,10 +303,77 @@ function MachineList({
 
   return (
     <div className="overflow-hidden rounded-lg border bg-card">
-      <div className="divide-y">
-        {machines.map((machine) => (
-          <MachineRow key={machine.id} machine={machine} />
-        ))}
+      <SortableMachineList machines={machines} />
+    </div>
+  );
+}
+
+// The webhook machines are sortable — their order IS the fallback order
+// (runtime placement, 2026-09-20) — and every other machine sits below
+// them, neither draggable nor a drop target. A drop writes the full id
+// list of every webhook runtime, in the new order.
+function SortableMachineList({ machines }: { machines: RuntimeMachine[] }) {
+  const wsId = useWorkspaceId();
+  const reorder = useReorderRuntimes(wsId);
+  const ordered = machines.filter((m) => m.dispatchOrder != null);
+  const rest = machines.filter((m) => m.dispatchOrder == null);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over) return;
+      const ids = nextRuntimeOrder(ordered, String(active.id), String(over.id));
+      if (ids) reorder.mutate(ids);
+    },
+    [ordered, reorder],
+  );
+
+  return (
+    <div className="divide-y">
+      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+        <SortableContext
+          items={ordered.map((m) => m.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          {ordered.map((machine, index) => (
+            <SortableMachineRow key={machine.id} machine={machine} rank={index + 1} />
+          ))}
+        </SortableContext>
+      </DndContext>
+      {rest.map((machine) => (
+        <MachineRow key={machine.id} machine={machine} />
+      ))}
+    </div>
+  );
+}
+
+function SortableMachineRow({ machine, rank }: { machine: RuntimeMachine; rank: number }) {
+  const { t } = useT("runtimes");
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: machine.id,
+  });
+  const style = { transform: CSS.Transform.toString(transform), transition };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      data-testid={`machine-row-${machine.id}`}
+      className={`flex items-stretch ${isDragging ? "bg-accent/40" : ""}`}
+    >
+      <button
+        type="button"
+        aria-label={t(($) => $.page.reorder_handle, { rank })}
+        className="flex w-9 shrink-0 cursor-grab touch-none items-center justify-center gap-0.5 text-muted-foreground/60 hover:text-muted-foreground active:cursor-grabbing"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical aria-hidden="true" className="h-3.5 w-3.5" />
+        <span className="w-4 text-[11px] font-medium tabular-nums">{rank}</span>
+      </button>
+      <div className="min-w-0 flex-1">
+        <MachineRow machine={machine} />
       </div>
     </div>
   );
@@ -290,6 +387,10 @@ function MachineRow({ machine }: { machine: RuntimeMachine }) {
   const Icon = machine.section === "cloud" ? Cloud : Monitor;
   const locator = machine.id;
   const busyCount = machine.runningCount + machine.queuedCount;
+  const placement =
+    machine.dispatchOrder != null
+      ? webhookMachineHealthText(machine, healthLabel(machine.health), timeAgo, t as never)
+      : null;
   const body = (
     <>
       <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-background">
@@ -318,9 +419,18 @@ function MachineRow({ machine }: { machine: RuntimeMachine }) {
         </span>
       </span>
 
-      <span className="hidden w-36 shrink-0 items-center gap-1.5 text-xs md:flex">
+      <span className="hidden w-36 shrink-0 items-center gap-1.5 text-xs md:flex lg:w-56">
         <HealthIcon health={machine.health} />
-        <span>{healthLabel(machine.health)}</span>
+        {placement ? (
+          <span className="flex min-w-0 flex-col" data-testid="placement-health">
+            <span className="truncate" title={placement.primary}>{placement.primary}</span>
+            {placement.secondary && (
+              <span className="truncate text-[11px] text-muted-foreground/70">{placement.secondary}</span>
+            )}
+          </span>
+        ) : (
+          <span>{healthLabel(machine.health)}</span>
+        )}
       </span>
       <span className="hidden w-40 shrink-0 flex-col gap-1 lg:flex">
         <span className="text-xs text-muted-foreground">

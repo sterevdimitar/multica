@@ -107,6 +107,16 @@ UPDATE agent SET mcp_config = NULL, updated_at = now()
 WHERE id = $1
 RETURNING *;
 
+-- name: SetAgentFallbackRuntimeIDs :one
+-- The runtimes this agent may fail over to when its own is down
+-- (dev-command-center design 2026-09-20-runtime-placement). Written
+-- wholesale by the pipeline reconciler from allowed_runtimes; a separate
+-- query rather than a COALESCE column in UpdateAgent so that '{}' - a pinned
+-- agent that never fails over - is an unambiguous write.
+UPDATE agent SET fallback_runtime_ids = @ids::uuid[], updated_at = now()
+WHERE id = $1
+RETURNING *;
+
 -- name: UpdateAgentCustomEnv :one
 -- Replaces an agent's custom_env map wholesale. Used by the dedicated
 -- env-management endpoint (POST/PUT /api/agents/{id}/env), which is the
@@ -592,6 +602,26 @@ UPDATE agent_task_queue
 SET status = 'dispatched', dispatched_at = now()
 WHERE id = $1 AND status = 'queued'
 RETURNING *;
+
+-- name: PlaceAgentTask :one
+-- DispatchAgentTask with a destination: the webhook placement writes WHERE
+-- the run goes together with the queued -> dispatched transition
+-- (dev-command-center design 2026-09-20-runtime-placement, P4/P5). The
+-- status predicate is the CAS that lets exactly one of two racing drains
+-- win; dispatched_at is written here and never at enqueue, so a wait is
+-- invisible to the dispatch timeout.
+UPDATE agent_task_queue
+SET status = 'dispatched', dispatched_at = now(), runtime_id = $2
+WHERE id = $1 AND status = 'queued'
+RETURNING *;
+
+-- name: RequeueDispatchedTask :execrows
+-- The receiver refused the dispatch (409 runtime_unavailable): the task goes
+-- back to queued for the next placement. dispatched_at is cleared so the
+-- clock restarts at the next PlaceAgentTask.
+UPDATE agent_task_queue
+SET status = 'queued', dispatched_at = NULL
+WHERE id = $1 AND status = 'dispatched';
 
 -- name: StartAgentTask :one
 -- Transitions a task to running. Accepts either 'dispatched' (the normal
@@ -1340,6 +1370,40 @@ WHERE atq.agent_id = $1 AND atq.status = 'queued'
   )
 ORDER BY atq.priority DESC, atq.created_at ASC
 LIMIT 1;
+
+-- name: FindQueuedWebhookTasks :many
+-- Every queued webhook task the placement may dispatch, oldest first - the
+-- workspace-wide drain (dev-command-center design 2026-09-20-runtime-
+-- placement, P11). FindOldestQueuedTaskForAgent's per-(issue, agent)
+-- serialisation is copied verbatim, without the agent filter; the
+-- runtime_mode join keeps daemon rows out, as PromoteDueDeferredWebhookTasks
+-- does. The limit bounds one drain; the next tick takes the rest.
+SELECT atq.* FROM agent_task_queue atq
+WHERE atq.status = 'queued'
+  AND EXISTS (
+    SELECT 1 FROM agent_runtime wr
+    WHERE wr.id = atq.runtime_id
+      AND wr.runtime_mode = 'webhook'
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_task_queue active
+      WHERE active.agent_id = atq.agent_id
+        AND active.status IN ('dispatched', 'running')
+        AND (
+          (atq.issue_id IS NOT NULL AND active.issue_id = atq.issue_id)
+          OR (atq.chat_session_id IS NOT NULL AND active.chat_session_id = atq.chat_session_id)
+          OR (
+            atq.issue_id IS NULL
+            AND atq.chat_session_id IS NULL
+            AND atq.autopilot_run_id IS NULL
+            AND active.issue_id IS NULL
+            AND active.chat_session_id IS NULL
+            AND active.autopilot_run_id IS NULL
+          )
+        )
+  )
+ORDER BY atq.priority DESC, atq.created_at ASC
+LIMIT 50;
 
 -- name: RefreshAgentStatusFromTasks :one
 UPDATE agent AS a

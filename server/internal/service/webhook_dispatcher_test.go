@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -170,4 +171,143 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// A 4xx is a rejection, not a transient failure (runtime placement P10): the
+// receiver understood the request and refused it, so retrying it three times
+// over ~15 s only delays the placement that must follow.
+func TestDispatchWithRetry_DoesNotRetryA409(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"reason":"runtime_unavailable","detail":"no online runner carries \"local-pc\" in o/r"}`))
+	}))
+	defer srv.Close()
+
+	err := DispatchWithRetry(context.Background(), DispatchTarget{
+		URL: srv.URL, Secret: "s", RuntimeID: "r", EventType: "e",
+	}, map[string]any{"x": 1}, http.DefaultClient, time.Now,
+		RetryPolicy{MaxAttempts: 3, InitialBackoff: 1 * time.Millisecond})
+	if err == nil {
+		t.Fatal("expected an error on 409")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected exactly 1 attempt on a 409, got %d", got)
+	}
+	var rejected *WebhookRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("error is %T (%v), want *WebhookRejectedError", err, err)
+	}
+	if rejected.Status != http.StatusConflict {
+		t.Errorf("Status = %d, want 409", rejected.Status)
+	}
+	detail, ok := rejected.RuntimeUnavailable()
+	if !ok {
+		t.Fatal("RuntimeUnavailable() = false, want true for the translator's 409 body")
+	}
+	if detail != `no online runner carries "local-pc" in o/r` {
+		t.Errorf("detail = %q", detail)
+	}
+}
+
+func TestDispatchWithRetry_A400IsRejectedButNotRuntimeUnavailable(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad runs_on"))
+	}))
+	defer srv.Close()
+
+	err := DispatchWithRetry(context.Background(), DispatchTarget{
+		URL: srv.URL, Secret: "s", RuntimeID: "r", EventType: "e",
+	}, map[string]any{"x": 1}, http.DefaultClient, time.Now,
+		RetryPolicy{MaxAttempts: 3, InitialBackoff: 1 * time.Millisecond})
+	var rejected *WebhookRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("error is %T (%v), want *WebhookRejectedError", err, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected exactly 1 attempt on a 400, got %d", got)
+	}
+	if _, ok := rejected.RuntimeUnavailable(); ok {
+		t.Error("a 400 must not read as runtime_unavailable")
+	}
+	if !contains(err.Error(), "400") || !contains(err.Error(), "bad runs_on") {
+		t.Errorf("error should mention status and body, got %q", err.Error())
+	}
+}
+
+// A 5xx keeps today's shape: retried, then the wrapped error.
+func TestDispatchWithRetry_A503IsStillRetried(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	err := DispatchWithRetry(context.Background(), DispatchTarget{
+		URL: srv.URL, Secret: "s", RuntimeID: "r", EventType: "e",
+	}, map[string]any{"x": 1}, http.DefaultClient, time.Now,
+		RetryPolicy{MaxAttempts: 3, InitialBackoff: 1 * time.Millisecond})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("expected 3 attempts on a 503, got %d", got)
+	}
+	var rejected *WebhookRejectedError
+	if errors.As(err, &rejected) {
+		t.Error("a 5xx must not be a WebhookRejectedError")
+	}
+}
+
+// The availability probe: a signed POST of {"event":"availability"} whose
+// 200 body is the answer; anything else is an error the caller ignores.
+func TestProbeWebhookAvailability(t *testing.T) {
+	var gotBody []byte
+	var gotHeaders http.Header
+	status := http.StatusOK
+	answer := `{"available":false,"reason":"no online runner carries \"local-pc\" in o/r","checked_at":"2026-09-20T12:00:00Z"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	target := DispatchTarget{URL: srv.URL, Secret: "s", RuntimeID: "r", EventType: "e"}
+
+	got, err := ProbeWebhookAvailability(context.Background(), target, http.DefaultClient, time.Now)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if got.Available || got.Reason != `no online runner carries "local-pc" in o/r` {
+		t.Errorf("answer = %+v", got)
+	}
+	if got.CheckedAt.IsZero() {
+		t.Error("checked_at not decoded")
+	}
+	if string(gotBody) != `{"event":"availability"}` {
+		t.Errorf("probe body = %s", gotBody)
+	}
+	if gotHeaders.Get("X-Multica-Signature") == "" || gotHeaders.Get("X-Multica-Timestamp") == "" {
+		t.Error("probe is not signed")
+	}
+
+	status = http.StatusBadRequest
+	answer = "envelope missing task or callback"
+	if _, err := ProbeWebhookAvailability(context.Background(), target, http.DefaultClient, time.Now); err == nil {
+		t.Error("a 400 (an older translator) must be an error, not an answer")
+	}
+
+	status = http.StatusOK
+	answer = "not json"
+	if _, err := ProbeWebhookAvailability(context.Background(), target, http.DefaultClient, time.Now); err == nil {
+		t.Error("an undecodable 200 must be an error")
+	}
 }

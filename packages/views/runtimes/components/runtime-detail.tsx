@@ -45,6 +45,7 @@ import { ProviderLogo } from "./provider-logo";
 import { UsageSection } from "./usage-section";
 import { DeleteRuntimeDialog } from "./delete-runtime-dialog";
 import { DeleteRuntimeProfileDialog } from "./delete-runtime-profile-dialog";
+import { PlacementCard } from "./placement-card";
 import { useT, useTimeAgo } from "../../i18n";
 
 function getCliVersion(metadata: Record<string, unknown>): string | null {
@@ -198,6 +199,9 @@ export function RuntimeDetail({
               presenceMap={presenceMap}
               agentHref={(id) => paths.agentDetail(id)}
             />
+            {runtime.runtime_mode === "webhook" && (
+              <PlacementCard runtime={runtime} canEdit={!!canEditRuntime} />
+            )}
             <DiagnosticsCard
               runtime={runtime}
               canEdit={!!canEditRuntime}

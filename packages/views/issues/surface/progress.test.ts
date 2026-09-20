@@ -178,6 +178,32 @@ describe("groupProgressRows", () => {
   });
 });
 
+// Runtime placement (2026-09-20): a failed-over member names the runtime
+// it ran on; the first one wins; a home member leaves it "".
+describe("groupProgressRows — off home", () => {
+  it("carries the off-home runtime from the first member that ran elsewhere", () => {
+    const rows = groupProgressRows([
+      task({ task_id: "a", agent_name: "fixer", runtime_name: "Local PC", off_home: false }),
+      task({ task_id: "b", agent_name: "fixer", runtime_name: "CircleCI", off_home: true }),
+      task({ task_id: "c", agent_name: "fixer", runtime_name: "dpm-laptop", off_home: true }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.offHomeRuntime).toBe("CircleCI");
+  });
+
+  it("is empty at home and when the server omits the fields", () => {
+    expect(groupProgressRows([task({ runtime_name: "Local PC", off_home: false })])[0]!.offHomeRuntime).toBe("");
+    expect(groupProgressRows([task({})])[0]!.offHomeRuntime).toBe("");
+  });
+
+  it("labels a live member too", () => {
+    const rows = groupProgressRows([
+      task({ task_id: "l", status: "running", completed_at: null, is_live: true, runtime_name: "CircleCI", off_home: true }),
+    ]);
+    expect(rows[0]!.offHomeRuntime).toBe("CircleCI");
+  });
+});
+
 describe("turn caps", () => {
   it("sums the cap across a group, like turns", () => {
     const rows = groupProgressRows([

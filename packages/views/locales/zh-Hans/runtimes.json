@@ -4,6 +4,8 @@
     "tagline": "为智能体跑 CLI 会话的机器和云端 worker。",
     "learn_more": "了解更多 →",
     "connect_remote": "添加电脑",
+    "placement_hint": "每个代理在自己的运行时上运行。当该运行时不可用时，其任务会转到此顺序中代理可用且有空闲槽位的第一个运行时。设为 0 会将运行时移出轮换；当所有运行时都已满时，任务会等待，直到有槽位空出再开始。",
+    "reorder_handle": "拖动以更改回退顺序（当前第 {{rank}} 位）",
     "search_placeholder": "搜索运行时...",
     "scope_mine": "我的",
     "scope_all": "全部",
@@ -38,6 +40,11 @@
     "section_remote": "远程",
     "section_cloud": "云端",
     "this_machine": "本机",
+    "placement": {
+      "running_of": "{{running}}/{{cap}} 运行中",
+      "running": "{{running}} 运行中",
+      "checked": "检查于 {{when}}"
+    },
     "local_badge": "本地 · 这台机器",
     "pending_custom_runtimes": "待注册自定义运行时",
     "runtime_count_other": "{{count}} 个运行时",
@@ -94,9 +101,27 @@
     "about_to_gc": {
       "label": "即将清理",
       "description": "离线 6 天以上。如不重连，将在 7 天时自动删除。"
+    },
+    "down": {
+      "label": "离线",
+      "description": "调度未找到可用于此运行时的 runner — 原因显示在单元格中。几分钟后会重试；期间其代理的运行会转到顺序中的下一个运行时。"
+    },
+    "out_of_rotation": {
+      "label": "已移出轮换",
+      "description": "同时运行数为 0。在调高该值之前不会向此处调度任何任务。"
     }
   },
   "detail": {
+    "runs_at_once": {
+      "title": "调度",
+      "label": "同时运行数",
+      "placeholder": "不限",
+      "note_containers": "请不要超过机器上的 runner 容器数量；Multica 不会启动或停止容器。",
+      "zero_note": "留空表示不限。0 会将此运行时移出轮换。",
+      "order": "回退顺序第 {{rank}} 位（共 {{total}} 个）— 在运行时页面拖动可更改",
+      "toast_updated": "同时运行数已更新",
+      "toast_failed": "无法更新同时运行数"
+    },
     "all_runtimes": "全部运行时",
     "read_only": "只读",
     "delete_button": "删除运行时",
@@ -216,7 +241,7 @@
       "secrets_summary": "密钥从哪里来",
       "secret_token": "<YOUR_TOKEN> — 在 设置 → 令牌 中创建的 Multica 令牌。",
       "secret_webhook": "<WEBHOOK_SECRET> — 分发服务用来校验的共享密钥，与注册现有 Webhook 运行时所用的相同。",
-      "secret_gh": "gh auth token 会用作 runner 的 ACCESS_TOKEN；只对该仓库授予 Administration: read & write 的 fine-grained PAT 权限更小。",
+      "secret_runtime": "<RUNTIME_TOKEN> — 由看板所有者提供的运行时令牌，与 CircleCI 存根使用的是同一个。仓库管理员也可改写 ACCESS_TOKEN=$(gh auth token)，并将 DCC_RUNTIME_TOKEN 留空。",
       "success_description": "运行时已注册。将它分配给某个代理即可开始分发。"
     }
   },

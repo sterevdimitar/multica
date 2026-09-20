@@ -89,12 +89,19 @@ describe("buildWebhookSetup", () => {
     expect(full.steps?.fetch).toContain("mkdir -p ~/local-runner && cd ~/local-runner");
   });
 
-  it("writes .env with the repo, the gh token and the label", () => {
+  // The runtime token, not a PAT: the control plane mints the registration
+  // token (dev-command-center design 2026-09-20), so no GitHub credential is
+  // written on the machine.
+  it("writes .env with the repo, the runtime token and the label", () => {
     expect(full.steps?.env).toContain(
       "REPO_URL=https://github.com/sterevdimitar/dev-command-center",
     );
+    expect(full.steps?.env).toContain("DCC_RUNTIME_URL=https://m.example");
+    expect(full.steps?.env).toContain("DCC_RUNTIME_TOKEN=<RUNTIME_TOKEN>");
+    expect(full.steps?.env).not.toContain("%s");
     expect(full.steps?.env).toContain("RUNNER_LABEL=local-pc");
-    expect(full.steps?.env).toContain('"$(gh auth token)"');
+    expect(full.steps?.env).not.toContain("ACCESS_TOKEN=");
+    expect(full.steps?.env).not.toContain("gh auth token");
     expect(full.steps?.env).toContain("chmod 600 .env");
   });
 

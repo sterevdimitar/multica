@@ -58,6 +58,7 @@ import { HealthIcon, useHealthLabel } from "./shared";
 import { DeleteRuntimeDialog } from "./delete-runtime-dialog";
 import { DeleteRuntimeProfileDialog } from "./delete-runtime-profile-dialog";
 import { RuntimeProfilesDialog } from "./runtime-profiles-dialog";
+import { webhookMachineHealthText } from "./runtime-machines";
 import {
   computeCostInWindow,
   pctChange,
@@ -150,33 +151,34 @@ export interface RuntimeRow {
 // the avatar stack; .length doubles as the agent count) plus task counts
 // split by status. Built once per render off the workspace-wide
 // agents / agent-task-snapshot caches; filtered locally — no extra requests.
+//
+// Tasks are counted by the TASK's runtime_id, not the agent's (runtime
+// placement, 2026-09-20): a failed-over run is counted where it runs. A
+// task whose runtime is not one an active agent serves still counts — the
+// row exists for the runtime, with no agents on it. `dispatched` counts as
+// running, matching what the placement counts against a runtime's cap.
 export function buildWorkloadIndex(
   agents: Agent[],
   tasks: AgentTask[],
 ): Map<string, RuntimeWorkload> {
   const result = new Map<string, RuntimeWorkload>();
-  const agentToRuntime = new Map<string, string>();
+  const activeAgents = new Set<string>();
+  const entryFor = (rid: string): RuntimeWorkload => {
+    const entry = result.get(rid) ?? { agentIds: [], runningCount: 0, queuedCount: 0 };
+    result.set(rid, entry);
+    return entry;
+  };
 
   for (const a of agents) {
     if (!a.runtime_id || a.archived_at) continue;
-    agentToRuntime.set(a.id, a.runtime_id);
-    const entry =
-      result.get(a.runtime_id) ?? {
-        agentIds: [],
-        runningCount: 0,
-        queuedCount: 0,
-      };
-    entry.agentIds.push(a.id);
-    result.set(a.runtime_id, entry);
+    activeAgents.add(a.id);
+    entryFor(a.runtime_id).agentIds.push(a.id);
   }
   for (const t of tasks) {
-    const rid = agentToRuntime.get(t.agent_id);
-    if (!rid) continue;
-    const entry = result.get(rid);
-    if (!entry) continue;
-    if (t.status === "running") entry.runningCount += 1;
-    else if (t.status === "queued" || t.status === "dispatched")
-      entry.queuedCount += 1;
+    if (!activeAgents.has(t.agent_id) || !t.runtime_id) continue;
+    const entry = entryFor(t.runtime_id);
+    if (t.status === "running" || t.status === "dispatched") entry.runningCount += 1;
+    else if (t.status === "queued") entry.queuedCount += 1;
   }
   return result;
 }
@@ -330,6 +332,34 @@ function HealthCell({
   const offline = health === "offline" || health === "about_to_gc";
   const lastSeen = runtime.last_seen_at ? timeAgo(runtime.last_seen_at) : null;
   const active = workload.runningCount + workload.queuedCount;
+
+  // A webhook runtime's cell is the placement's (2026-09-20): running/cap,
+  // or the down reason and when the probe last checked.
+  if (runtime.runtime_mode === "webhook") {
+    const text = webhookMachineHealthText(
+      {
+        health,
+        runningCount: workload.runningCount,
+        maxConcurrentTasks: runtime.max_concurrent_tasks ?? null,
+        downReason: runtime.down_reason ?? null,
+        availabilityCheckedAt: runtime.availability_checked_at ?? null,
+      },
+      labelOf(health),
+      timeAgo,
+      t as never,
+    );
+    return (
+      <ListGridCell className="gap-1.5">
+        <HealthIcon health={health} />
+        <span className="flex min-w-0 flex-col text-xs" data-testid="placement-health">
+          <span className="truncate" title={text.primary}>{text.primary}</span>
+          {text.secondary && (
+            <span className="truncate text-[11px] text-muted-foreground">{text.secondary}</span>
+          )}
+        </span>
+      </ListGridCell>
+    );
+  }
 
   return (
     <ListGridCell className="gap-1.5">

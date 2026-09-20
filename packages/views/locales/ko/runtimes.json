@@ -4,6 +4,8 @@
     "tagline": "에이전트의 CLI 세션을 실행하는 기기와 클라우드 워커입니다.",
     "learn_more": "자세히 보기 →",
     "connect_remote": "컴퓨터 추가",
+    "placement_hint": "각 에이전트는 자기 런타임에서 실행됩니다. 그 런타임이 다운되면 실행은 이 순서에서 에이전트가 사용할 수 있고 빈 슬롯이 있는 첫 런타임으로 갑니다. 0은 런타임을 로테이션에서 제외합니다. 모든 런타임이 가득 차면 실행은 대기하다가 슬롯이 비면 시작합니다.",
+    "reorder_handle": "드래그하여 대체 순서 변경 (현재 {{rank}}번째)",
     "search_placeholder": "런타임 검색...",
     "scope_mine": "내 것",
     "scope_all": "전체",
@@ -38,6 +40,11 @@
     "section_remote": "원격",
     "section_cloud": "클라우드",
     "this_machine": "이 Mac",
+    "placement": {
+      "running_of": "{{running}}/{{cap}} 실행 중",
+      "running": "{{running}} 실행 중",
+      "checked": "확인 {{when}}"
+    },
     "local_badge": "로컬 · 이 기기",
     "pending_custom_runtimes": "등록 대기 중인 사용자 지정 런타임",
     "runtime_count_other": "런타임 {{count}}개",
@@ -94,9 +101,27 @@
     "about_to_gc": {
       "label": "곧 정리됨",
       "description": "6일 넘게 오프라인입니다. 다시 연결되지 않으면 7일째 자동 삭제됩니다."
+    },
+    "down": {
+      "label": "오프라인",
+      "description": "이 런타임을 처리할 러너를 찾지 못했습니다 — 이유는 셀에 표시됩니다. 몇 분 뒤 다시 시도하며, 그동안 이 런타임의 에이전트 실행은 순서상 다음 런타임으로 갑니다."
+    },
+    "out_of_rotation": {
+      "label": "로테이션 제외",
+      "description": "동시 실행 수가 0입니다. 값을 올리기 전까지 여기에는 아무것도 배치되지 않습니다."
     }
   },
   "detail": {
+    "runs_at_once": {
+      "title": "배치",
+      "label": "동시 실행 수",
+      "placeholder": "제한 없음",
+      "note_containers": "머신의 러너 컨테이너 수 이하로 유지하세요. Multica는 컨테이너를 시작하거나 중지하지 않습니다.",
+      "zero_note": "비워 두면 제한 없음. 0은 이 런타임을 로테이션에서 제외합니다.",
+      "order": "대체 순서 {{total}}개 중 {{rank}}번째 — 런타임 페이지에서 드래그하여 변경",
+      "toast_updated": "동시 실행 수를 업데이트했습니다",
+      "toast_failed": "동시 실행 수를 업데이트하지 못했습니다"
+    },
     "all_runtimes": "모든 런타임",
     "read_only": "읽기 전용",
     "delete_button": "런타임 삭제",
@@ -216,7 +241,7 @@
       "secrets_summary": "시크릿은 어디서 가져오나요",
       "secret_token": "<YOUR_TOKEN> — 설정 → 토큰에서 만든 Multica 토큰.",
       "secret_webhook": "<WEBHOOK_SECRET> — 디스패치 서비스가 검증하는 공유 시크릿. 기존 Webhook 런타임을 등록할 때 쓴 것과 같습니다.",
-      "secret_gh": "gh auth token은 러너의 ACCESS_TOKEN으로 사용됩니다. 해당 저장소 하나에만 Administration: read & write 권한을 준 fine-grained PAT가 더 좁은 선택입니다.",
+      "secret_runtime": "<RUNTIME_TOKEN> — 보드 소유자에게 받는 런타임 토큰으로, CircleCI 스텁이 쓰는 것과 같습니다. 저장소 관리자는 대신 ACCESS_TOKEN=$(gh auth token)을 쓰고 DCC_RUNTIME_TOKEN은 비워 둘 수 있습니다.",
       "success_description": "런타임이 등록되었습니다. 에이전트에 할당하면 디스패치가 시작됩니다."
     }
   },

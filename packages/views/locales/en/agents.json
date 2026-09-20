@@ -170,6 +170,7 @@
     "section_skills": "Skills",
     "section_integrations": "Integrations",
     "prop_runtime": "Runtime",
+    "prop_runtime_hint": "Preferred runtime. When it is down, this agent's runs go to the next runtime it may use, in the order on the Runtimes page.",
     "prop_model": "Model",
     "prop_thinking": "Thinking",
     "prop_visibility": "Visibility",

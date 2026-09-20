@@ -181,6 +181,11 @@ export function IssueProgressHoverContent({ issueId }: IssueProgressHoverContent
                 {/* The reason a failed step failed, in its own words. This
                     replaces the "21/20" ratio that used to hint at it and
                     could not do so correctly — see formatTurns. */}
+                {row.offHomeRuntime && (
+                  <span className="ml-1 text-muted-foreground" data-testid="off-home">
+                    {t(($) => $.progress.on_runtime, { runtime: row.offHomeRuntime })}
+                  </span>
+                )}
                 {row.status === "failed" && row.failureReason && (
                   <span className="ml-1 text-muted-foreground" title={row.failureReason}>
                     {shortFailureReason(row.failureReason)}

@@ -1271,6 +1271,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Runtimes
 			r.Route("/api/runtimes", func(r chi.Router) {
 				r.Get("/", h.ListAgentRuntimes)
+				// The fallback order of the workspace's webhook runtimes
+				// (runtime placement, 2026-09-20). Declared before the
+				// {runtimeId} group so chi does not read "order" as an id.
+				r.Put("/order", h.ReorderAgentRuntimes)
 				r.Route("/{runtimeId}", func(r chi.Router) {
 					r.Patch("/", h.UpdateAgentRuntime)
 					r.Get("/usage", h.GetRuntimeUsage)

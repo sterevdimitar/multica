@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -45,6 +47,17 @@ type AgentRuntimeResponse struct {
 	LastSeenAt *string `json:"last_seen_at"`
 	CreatedAt  string  `json:"created_at"`
 	UpdatedAt  string  `json:"updated_at"`
+	// Runtime placement (dev-command-center design 2026-09-20): the cap, the
+	// position in the fallback order and the measured availability of a
+	// webhook runtime. Meaningless — and NULL/0 — on a daemon runtime.
+	//   max_concurrent_tasks  null = no limit, 0 = out of the rotation
+	//   dispatch_order        lower first; written by PUT /api/runtimes/order
+	//   down_until            unavailable until this instant; null = available
+	MaxConcurrentTasks    *int32  `json:"max_concurrent_tasks"`
+	DispatchOrder         int32   `json:"dispatch_order"`
+	DownUntil             *string `json:"down_until"`
+	DownReason            *string `json:"down_reason"`
+	AvailabilityCheckedAt *string `json:"availability_checked_at"`
 }
 
 func runtimeToResponse(rt db.AgentRuntime) AgentRuntimeResponse {
@@ -74,6 +87,12 @@ func runtimeToResponse(rt db.AgentRuntime) AgentRuntimeResponse {
 		LastSeenAt:   timestampToPtr(rt.LastSeenAt),
 		CreatedAt:    timestampToString(rt.CreatedAt),
 		UpdatedAt:    timestampToString(rt.UpdatedAt),
+
+		MaxConcurrentTasks:    int4ToPtr(rt.MaxConcurrentTasks),
+		DispatchOrder:         rt.DispatchOrder,
+		DownUntil:             timestampToPtr(rt.DownUntil),
+		DownReason:            textToPtr(rt.DownReason),
+		AvailabilityCheckedAt: timestampToPtr(rt.AvailabilityCheckedAt),
 	}
 }
 
@@ -422,6 +441,12 @@ type UpdateAgentRuntimeRequest struct {
 	// runtime per provider) instead of just this one. Ignored when the
 	// runtime has no daemon_id.
 	ApplyToMachine bool `json:"apply_to_machine,omitempty"`
+	// MaxConcurrentTasks is "runs at once" on a webhook runtime (runtime
+	// placement, 2026-09-20), a tri-state read from the raw body:
+	//   omitted → unchanged · null → no limit · integer >= 0 → set
+	// (0 takes the runtime out of the rotation). Decoded by hand in
+	// UpdateAgentRuntime so null and omitted stay distinguishable.
+	MaxConcurrentTasks json.RawMessage `json:"max_concurrent_tasks,omitempty"`
 }
 
 // maxRuntimeCustomNameLen caps a runtime's custom name. Default names are
@@ -486,7 +511,34 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var (
+		newCap  pgtype.Int4
+		needCap bool
+	)
+	if len(req.MaxConcurrentTasks) > 0 {
+		cap, ok := parseRuntimeCap(req.MaxConcurrentTasks)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "max_concurrent_tasks must be a non-negative integer or null")
+			return
+		}
+		newCap, needCap = cap, true
+	}
+
 	changed := false
+
+	if needCap {
+		updated, err := h.Queries.UpdateAgentRuntimeMaxConcurrentTasks(r.Context(), db.UpdateAgentRuntimeMaxConcurrentTasksParams{
+			ID:                 runtimeUUID,
+			MaxConcurrentTasks: newCap,
+		})
+		if err != nil {
+			slog.Error("UpdateAgentRuntimeMaxConcurrentTasks failed", "error", err, "runtime_id", runtimeID)
+			writeError(w, http.StatusInternalServerError, "failed to update runtime")
+			return
+		}
+		rt = updated
+		changed = true
+	}
 
 	if needVisibility {
 		updated, err := h.Queries.UpdateAgentRuntimeVisibility(r.Context(), db.UpdateAgentRuntimeVisibilityParams{
@@ -568,6 +620,112 @@ func canEditRuntime(member db.Member, rt db.AgentRuntime) bool {
 		return true
 	}
 	return rt.OwnerID.Valid && uuidToString(rt.OwnerID) == uuidToString(member.UserID)
+}
+
+// parseRuntimeCap reads max_concurrent_tasks from the raw body: JSON null
+// is "no limit" (a NULL write); a non-negative integer is the cap. Anything
+// else — a negative, a fraction, a string — is refused.
+func parseRuntimeCap(raw json.RawMessage) (pgtype.Int4, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return pgtype.Int4{}, true
+	}
+	// A bare non-negative integer token: json.Number would also accept a
+	// quoted "3", which is a string and must not count.
+	if len(trimmed) == 0 || len(trimmed) > 9 {
+		return pgtype.Int4{}, false
+	}
+	for _, c := range trimmed {
+		if c < '0' || c > '9' {
+			return pgtype.Int4{}, false
+		}
+	}
+	v, err := strconv.ParseInt(string(trimmed), 10, 32)
+	if err != nil || v < 0 || v > math.MaxInt32 {
+		return pgtype.Int4{}, false
+	}
+	return pgtype.Int4{Int32: int32(v), Valid: true}, true
+}
+
+// ReorderRuntimesRequest is the body of PUT /api/runtimes/order: the full
+// list of the workspace's webhook runtime ids in the wanted fallback order.
+type ReorderRuntimesRequest struct {
+	WorkspaceID string   `json:"workspace_id"`
+	RuntimeIDs  []string `json:"runtime_ids"`
+}
+
+// ReorderAgentRuntimes handles PUT /api/runtimes/order (runtime placement,
+// 2026-09-20): writes dispatch_order = position for every webhook runtime
+// in the workspace. The list must be exactly the workspace's webhook
+// runtimes — nothing missing, nothing foreign, no duplicates — so the order
+// the page shows is always total. Workspace owner/admin only: the order is
+// a workspace-wide setting, not one runtime's.
+func (h *Handler) ReorderAgentRuntimes(w http.ResponseWriter, r *http.Request) {
+	var req ReorderRuntimesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	wsUUID, ok := parseUUIDOrBadRequest(w, req.WorkspaceID, "workspace_id")
+	if !ok {
+		return
+	}
+	member, ok := h.requireWorkspaceMember(w, r, req.WorkspaceID, "workspace not found")
+	if !ok {
+		return
+	}
+	if !roleAllowed(member.Role, "owner", "admin") {
+		writeError(w, http.StatusForbidden, "only workspace owners and admins can reorder runtimes")
+		return
+	}
+
+	current, err := h.Queries.ListWebhookRuntimesByOrder(r.Context(), wsUUID)
+	if err != nil {
+		slog.Error("ListWebhookRuntimesByOrder failed", "error", err, "workspace_id", req.WorkspaceID)
+		writeError(w, http.StatusInternalServerError, "failed to list runtimes")
+		return
+	}
+	want := make(map[string]bool, len(current))
+	for _, rt := range current {
+		want[uuidToString(rt.ID)] = true
+	}
+	ids := make([]pgtype.UUID, 0, len(req.RuntimeIDs))
+	seen := make(map[string]bool, len(req.RuntimeIDs))
+	for _, id := range req.RuntimeIDs {
+		if !want[id] || seen[id] {
+			writeError(w, http.StatusBadRequest, "runtime_ids must be exactly this workspace's webhook runtimes")
+			return
+		}
+		seen[id] = true
+		ids = append(ids, util.MustParseUUID(id))
+	}
+	if len(seen) != len(want) {
+		writeError(w, http.StatusBadRequest, "runtime_ids must be exactly this workspace's webhook runtimes")
+		return
+	}
+
+	if err := h.Queries.SetRuntimeDispatchOrder(r.Context(), db.SetRuntimeDispatchOrderParams{
+		Ids:         ids,
+		WorkspaceID: wsUUID,
+	}); err != nil {
+		slog.Error("SetRuntimeDispatchOrder failed", "error", err, "workspace_id", req.WorkspaceID)
+		writeError(w, http.StatusInternalServerError, "failed to reorder runtimes")
+		return
+	}
+	h.publish(protocol.EventDaemonRegister, req.WorkspaceID, "member", uuidToString(member.UserID), map[string]any{
+		"action": "update",
+	})
+
+	ordered, err := h.Queries.ListWebhookRuntimesByOrder(r.Context(), wsUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list runtimes")
+		return
+	}
+	out := make([]AgentRuntimeResponse, 0, len(ordered))
+	for _, rt := range ordered {
+		out = append(out, runtimeToResponse(rt))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) runtimeHasLiveProfile(ctx context.Context, rt db.AgentRuntime) (bool, error) {

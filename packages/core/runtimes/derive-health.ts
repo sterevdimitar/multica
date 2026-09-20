@@ -13,6 +13,17 @@ const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const ABOUT_TO_GC_THRESHOLD_MS = 6 * 24 * 3600 * 1000; // 6 days
 
 export function deriveRuntimeHealth(runtime: AgentRuntime, now: number): RuntimeHealth {
+  // A webhook runtime has no heartbeat: it registers online and stays so.
+  // Its health is the placement's (runtime placement, 2026-09-20): out of
+  // the rotation when its cap is 0, down while its cool-down runs, else
+  // online. The placement columns are meaningless on a daemon row and are
+  // ignored there.
+  if (runtime.runtime_mode === "webhook") {
+    if (runtime.max_concurrent_tasks === 0) return "out_of_rotation";
+    const downUntil = runtime.down_until ? Date.parse(runtime.down_until) : NaN;
+    if (Number.isFinite(downUntil) && downUntil > now) return "down";
+    return "online";
+  }
   if (runtime.status === "online") return "online";
 
   // No last_seen timestamp ever recorded — treat as long-offline. This is

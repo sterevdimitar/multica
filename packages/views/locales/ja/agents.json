@@ -154,6 +154,7 @@
     "section_skills": "スキル",
     "section_integrations": "連携",
     "prop_runtime": "ランタイム",
+    "prop_runtime_hint": "優先ランタイム。ダウンしているときは、このエージェントの実行は使用可能な次のランタイム（ランタイムページの順序）に送られます。",
     "prop_model": "モデル",
     "prop_thinking": "思考",
     "prop_visibility": "公開範囲",

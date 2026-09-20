@@ -130,19 +130,54 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
 
+	var tick uint64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			tick++
+			// Every other tick (60 s): the availability probe, the first
+			// writer of a webhook runtime's down_until. Before the placement
+			// tick below, so a runtime that just came back is placed on in
+			// the same pass.
+			if tick%2 == 0 {
+				sweepRuntimeAvailability(ctx, taskSvc)
+			}
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepStaleTasks(ctx, queries, taskSvc, bus)
 			sweepStaleWebhookTasks(ctx, queries, taskSvc)
 			sweepDeferredWebhookTasks(ctx, queries, taskSvc)
+			sweepWebhookPlacement(ctx, taskSvc)
 			sweepExpiredQueuedTasks(ctx, queries, taskSvc)
 			sweepDeferredChatFinalizations(ctx, queries, taskSvc)
 			gcRuntimes(ctx, queries, bus)
 		}
+	}
+}
+
+// sweepRuntimeAvailability asks every webhook runtime's receiver whether
+// its label is served and writes down_until from the answer — the probe of
+// dev-command-center design 2026-09-20-runtime-placement §2. It fails
+// open: no answer, no write. The runtimes page's health cell and the
+// placement both read what it writes.
+func sweepRuntimeAvailability(ctx context.Context, taskSvc *service.TaskService) {
+	if probed, down := taskSvc.ProbeRuntimeAvailability(ctx); down > 0 {
+		slog.Info("runtime probe: webhook runtimes down", "probed", probed, "down", down)
+	}
+}
+
+// sweepWebhookPlacement re-places every queued webhook task the placement
+// can fit — the clock a WAITING run has. A run waits when its home is full,
+// or down with no fallback free; what changes that is a completion (which
+// drains on its own), a cool-down expiring, a probe flipping a runtime up,
+// or a cap being raised — and only this tick sees the last three. Ordered
+// AFTER sweepDeferredWebhookTasks so a retry promoted this tick is placed in
+// the same pass, and after sweepStaleWebhookTasks so a row that tick just
+// failed is not touched.
+func sweepWebhookPlacement(ctx context.Context, taskSvc *service.TaskService) {
+	if n := taskSvc.DrainWebhookQueue(ctx); n > 0 {
+		slog.Info("webhook placement: placed waiting tasks", "count", n)
 	}
 }
 

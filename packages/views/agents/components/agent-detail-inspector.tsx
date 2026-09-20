@@ -210,6 +210,7 @@ export function AgentDetailInspector({
         <SettingsCard>
           <SettingsRow
             label={t(($) => $.inspector.prop_runtime)}
+            description={t(($) => $.inspector.prop_runtime_hint)}
             size="select-wide"
           >
             <RuntimePicker

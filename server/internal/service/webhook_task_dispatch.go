@@ -252,19 +252,12 @@ func (s *TaskService) buildWebhookPullRequests(ctx context.Context, issueID pgty
 // transport, but immutable in production.
 var webhookHTTPClient = &http.Client{Timeout: webhookDispatchTimeout}
 
-// MaybeDispatchToWebhook checks whether the task's runtime is webhook-mode
-// and — if so — fires a webhook dispatch in a background goroutine. Returns
-// true when a dispatch was started (caller should skip the normal
-// notifyTaskAvailable wakeup), false when the runtime is local and the
-// existing daemon-claim path should be taken instead.
-//
-// The dispatch is fire-and-forget at the goroutine level: failures are
-// logged but don't propagate back to the request that created the task.
-// DispatchWithRetry's exponential backoff handles transient receiver
-// outages; permanent failures land in the task's failure_reason via a
-// downstream queue-failer (left for Task A10, currently the task just sits
-// claimed-but-unstarted until the operator intervenes — same failure mode
-// as a daemon that's claimed a task then crashed).
+// MaybeDispatchToWebhook is the webhook half of every enqueue site: it
+// places the task (webhook_placement.go) when the agent's CURRENT runtime is
+// a webhook runtime and returns true; false means the daemon claim path
+// should be taken instead. True does not mean dispatched — a task the
+// placement cannot fit anywhere yet stays `queued` and is re-placed by the
+// next drain (design 2026-09-20-runtime-placement §3).
 //
 // Disabled by default; set MULTICA_WEBHOOK_RUNTIME=1 to enable. With the
 // flag off, webhook runtimes can still be registered but dispatch is a
@@ -274,56 +267,32 @@ func (s *TaskService) MaybeDispatchToWebhook(ctx context.Context, task db.AgentT
 	if os.Getenv("MULTICA_WEBHOOK_RUNTIME") != "1" {
 		return false
 	}
-
-	runtime, err := s.Queries.GetAgentRuntime(ctx, task.RuntimeID)
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			slog.Error("webhook: load runtime", "err", err, "task_id", util.UUIDToString(task.ID))
-		}
-		return false
-	}
-	if runtime.RuntimeMode != "webhook" {
-		return false
-	}
-	if !runtime.WebhookUrl.Valid || runtime.WebhookUrl.String == "" {
-		slog.Error("webhook: runtime in mode=webhook but no webhook_url", "runtime_id", util.UUIDToString(runtime.ID))
-		return false
-	}
-
-	agent, err := s.Queries.GetAgent(ctx, task.AgentID)
-	if err != nil {
-		slog.Error("webhook: load agent for capacity check", "err", err, "task_id", util.UUIDToString(task.ID))
-		return false
-	}
-	running, err := s.Queries.CountRunningTasks(ctx, task.AgentID)
-	if err != nil {
-		slog.Error("webhook: count running tasks", "err", err, "task_id", util.UUIDToString(task.ID))
-		return false
-	}
-	if running >= int64(agent.MaxConcurrentTasks) {
-		slog.Info("webhook: no capacity, task stays queued",
-			"task_id", util.UUIDToString(task.ID),
-			"agent_id", util.UUIDToString(task.AgentID),
-			"running", running, "max", agent.MaxConcurrentTasks)
-		return true
-	}
-
-	s.dispatchWebhookTask(ctx, task, runtime, agent)
-	return true
+	return s.placeWebhookTask(ctx, task)
 }
 
-// dispatchWebhookTask transitions a queued task to dispatched and fires
-// the webhook POST in a background goroutine. Extracted from
-// MaybeDispatchToWebhook so MaybeDispatchNextQueuedWebhookTask can
-// reuse the same dispatch logic.
-func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTaskQueue, runtime db.AgentRuntime, agent db.Agent) {
+// dispatchWebhookTask places a queued task on `runtime` (queued ->
+// dispatched, runtime_id written in the same CAS — P4/P5) and fires the
+// webhook POST in a background goroutine. `from` is the agent's home when
+// the placement is a failover, nil when the run is at home; a failover
+// leaves one note on the card.
+func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTaskQueue, runtime db.AgentRuntime, agent db.Agent, from *db.AgentRuntime) {
 	taskID := util.UUIDToString(task.ID)
 	runtimeID := util.UUIDToString(runtime.ID)
 
-	dispatched, err := s.Queries.DispatchAgentTask(ctx, task.ID)
+	dispatched, err := s.Queries.PlaceAgentTask(ctx, db.PlaceAgentTaskParams{ID: task.ID, RuntimeID: runtime.ID})
 	if err != nil {
-		slog.Error("webhook: set task dispatched", "err", err, "task_id", taskID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Another drain won the CAS (P5), or the task was cancelled.
+			slog.Info("webhook: task no longer queued at placement; nothing to do", "task_id", taskID)
+			return
+		}
+		slog.Error("webhook: place task", "err", err, "task_id", taskID)
 		return
+	}
+	if from != nil && dispatched.IssueID.Valid {
+		slog.Warn("webhook: failing over", "task_id", taskID,
+			"from", runtimeDisplayName(*from), "to", runtimeDisplayName(runtime), "reason", from.DownReason.String)
+		s.createAgentComment(ctx, dispatched.IssueID, dispatched.AgentID, failoverNote(*from, runtime), "system", pgtype.UUID{}, dispatched.ID)
 	}
 
 	// Move the card off its promotable statuses (see promotableStatuses) the
@@ -429,6 +398,13 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 		err := DispatchWithRetry(dctx, target, payload, webhookHTTPClient, time.Now,
 			RetryPolicy{MaxAttempts: 3, InitialBackoff: 1 * time.Second})
 		if err != nil {
+			var rejected *WebhookRejectedError
+			if errors.As(err, &rejected) {
+				if detail, ok := rejected.RuntimeUnavailable(); ok {
+					s.handleRefusedDispatch(dctx, dispatched.ID, runtime, detail)
+					return
+				}
+			}
 			slog.Error("webhook: dispatch failed after retries",
 				"err", err, "task_id", taskID, "runtime_id", runtimeID, "url", target.URL)
 			return
@@ -437,45 +413,27 @@ func (s *TaskService) dispatchWebhookTask(ctx context.Context, task db.AgentTask
 	}()
 }
 
-// MaybeDispatchNextQueuedWebhookTask checks whether the agent has
-// capacity for another webhook task after one just completed, failed or
-// was cancelled.
-// If a queued task exists and the agent's max_concurrent_tasks allows
-// it, the task is dispatched immediately. Called from CompleteTask,
-// FailTask and CancelTaskWithResult so the queue drains without waiting
-// for the next enqueue.
-func (s *TaskService) MaybeDispatchNextQueuedWebhookTask(ctx context.Context, agentID pgtype.UUID) {
-	if os.Getenv("MULTICA_WEBHOOK_RUNTIME") != "1" {
-		return
-	}
-
-	agent, err := s.Queries.GetAgent(ctx, agentID)
+// handleRefusedDispatch is the second writer of down_until (design §2): the
+// receiver answered 409 runtime_unavailable — nothing was fired — so the
+// task goes back to queued, the runtime cools down, and the drain places
+// the task again at once: with the home in cool-down it lands on a fallback
+// or waits.
+func (s *TaskService) handleRefusedDispatch(ctx context.Context, taskID pgtype.UUID, runtime db.AgentRuntime, detail string) {
+	id := util.UUIDToString(taskID)
+	n, err := s.Queries.RequeueDispatchedTask(ctx, taskID)
 	if err != nil {
+		slog.Error("webhook: requeue refused task", "err", err, "task_id", id)
 		return
 	}
-	if !agent.RuntimeID.Valid {
-		return
+	if n == 0 {
+		// Finished or cancelled in the window; the cool-down still applies.
+		slog.Info("webhook: refused task is no longer dispatched; not requeued", "task_id", id)
+	} else {
+		slog.Warn("webhook: dispatch refused, task requeued", "task_id", id,
+			"runtime", runtimeDisplayName(runtime), "detail", detail)
 	}
-
-	runtime, err := s.Queries.GetAgentRuntime(ctx, agent.RuntimeID)
-	if err != nil || runtime.RuntimeMode != "webhook" {
-		return
-	}
-
-	running, err := s.Queries.CountRunningTasks(ctx, agentID)
-	if err != nil || running >= int64(agent.MaxConcurrentTasks) {
-		return
-	}
-
-	next, err := s.Queries.FindOldestQueuedTaskForAgent(ctx, agentID)
-	if err != nil {
-		return
-	}
-
-	slog.Info("webhook: draining queue after completion",
-		"task_id", util.UUIDToString(next.ID),
-		"agent_id", util.UUIDToString(agentID))
-	s.dispatchWebhookTask(ctx, next, runtime, agent)
+	s.markRuntimeDown(ctx, runtime.ID, time.Now().Add(runtimeCoolDown), detail)
+	s.DrainWebhookQueue(ctx)
 }
 
 // PromoteDueDeferredWebhookTasks is the clock a deferred webhook retry has.
@@ -488,7 +446,7 @@ func (s *TaskService) MaybeDispatchNextQueuedWebhookTask(ctx context.Context, ag
 //
 // Each promoted row is announced and dispatched the way the enqueue sites
 // do it. No capacity leaves it `queued`, to drain through
-// MaybeDispatchNextQueuedWebhookTask like any other queued task; a false
+// DrainWebhookQueue like any other queued task; a false
 // from MaybeDispatchToWebhook is the feature flag being off, logged so a
 // misconfigured server says so instead of silently parking every retry at
 // `queued` until queuedTTLSeconds. Returns the number promoted.

@@ -1,6 +1,9 @@
 export type AgentStatus = "idle" | "working" | "blocked" | "error" | "offline";
 
-export type AgentRuntimeMode = "local" | "cloud";
+// "webhook" is the fork's third mode (a stateless HTTP receiver — the
+// GitHub Actions translator); the server has sent it since the webhook
+// runtime landed, and the placement (2026-09-20) branches on it.
+export type AgentRuntimeMode = "local" | "cloud" | "webhook";
 
 export type AgentVisibility = "workspace" | "private";
 
@@ -85,6 +88,20 @@ export interface RuntimeDevice {
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Runtime placement (dev-command-center design 2026-09-20), webhook
+   * runtimes only; older backends omit all five.
+   *   max_concurrent_tasks  runs at once: null = no limit, 0 = out of the rotation
+   *   dispatch_order        position in the fallback order; lower first
+   *   down_until            unavailable until this instant; null/past = available
+   *   down_reason           why, for the health cell
+   *   availability_checked_at  when the probe last answered
+   */
+  max_concurrent_tasks?: number | null;
+  dispatch_order?: number;
+  down_until?: string | null;
+  down_reason?: string | null;
+  availability_checked_at?: string | null;
 }
 
 export type AgentRuntime = RuntimeDevice;
@@ -351,6 +368,12 @@ export interface Agent {
   id: string;
   workspace_id: string;
   runtime_id: string;
+  /**
+   * The webhook runtimes this agent may fail over to when its own is down
+   * (runtime placement, 2026-09-20). Written by the pipeline reconciler,
+   * never by the UI; [] = pinned. Older backends omit it.
+   */
+  fallback_runtime_ids?: string[];
   name: string;
   description: string;
   instructions: string;

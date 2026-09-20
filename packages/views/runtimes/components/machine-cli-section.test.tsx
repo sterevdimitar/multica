@@ -66,6 +66,10 @@ function machine(runtimes: AgentRuntime[]): RuntimeMachine {
     queuedCount: 0,
     providerNames: runtimes.map((item) => item.provider),
     lastSeenAt: "2026-07-15T00:00:00Z",
+    dispatchOrder: null,
+    maxConcurrentTasks: null,
+    downReason: null,
+    availabilityCheckedAt: null,
   };
 }
 

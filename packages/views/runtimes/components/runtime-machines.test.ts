@@ -3,9 +3,11 @@ import type { AgentRuntime } from "@multica/core/types";
 import {
   buildRuntimeMachines,
   filterRuntimeMachines,
+  nextRuntimeOrder,
   runtimeMachineCounts,
   sharedCustomName,
   splitRuntimeName,
+  webhookMachineHealthText,
 } from "./runtime-machines";
 
 const NOW = new Date("2026-05-17T12:00:00Z").getTime();
@@ -402,5 +404,118 @@ describe("sharedCustomName", () => {
       ]),
     ).toBeNull();
     expect(sharedCustomName([])).toBeNull();
+  });
+});
+
+// Runtime placement (2026-09-20): webhook machines carry the fallback order
+// and sort by it, ahead of every daemon machine; a daemon machine is never
+// in the order.
+describe("fallback order", () => {
+  const webhook = (id: string, order: number, extra: Partial<AgentRuntime> = {}) =>
+    makeRuntime({
+      id,
+      daemon_id: `${id}-runner`,
+      name: id,
+      runtime_mode: "webhook",
+      dispatch_order: order,
+      created_at: `2026-05-17T1${order}:00:00Z`,
+      ...extra,
+    });
+
+  it("orders webhook machines by dispatch_order, then daemon machines", () => {
+    const machines = buildRuntimeMachines(
+      [
+        webhook("circleci", 2),
+        makeRuntime({ id: "daemon", daemon_id: "d", name: "Claude (d.local)" }),
+        webhook("local-pc", 0),
+        webhook("dpm-laptop", 1),
+      ],
+      { now: NOW },
+    );
+    expect(machines.map((m) => m.runtimes[0]?.id)).toEqual(["local-pc", "dpm-laptop", "circleci", "daemon"]);
+    expect(machines.map((m) => m.dispatchOrder)).toEqual([0, 1, 2, null]);
+  });
+
+  it("keeps a down webhook machine in its place", () => {
+    const machines = buildRuntimeMachines(
+      [
+        webhook("b", 1),
+        webhook("a", 0, { down_until: "2099-01-01T00:00:00Z", down_reason: "no online runner" }),
+      ],
+      { now: NOW },
+    );
+    expect(machines.map((m) => m.runtimes[0]?.id)).toEqual(["a", "b"]);
+    expect(machines[0]?.health).toBe("down");
+    expect(machines[0]?.downReason).toBe("no online runner");
+  });
+
+  it("carries the cap for the health cell", () => {
+    const [m] = buildRuntimeMachines([webhook("a", 0, { max_concurrent_tasks: 3 })], { now: NOW });
+    expect(m?.maxConcurrentTasks).toBe(3);
+    const [zero] = buildRuntimeMachines([webhook("a", 0, { max_concurrent_tasks: 0 })], { now: NOW });
+    expect(zero?.health).toBe("out_of_rotation");
+  });
+
+  it("treats a missing dispatch_order (older backend) as 0", () => {
+    const [m] = buildRuntimeMachines([webhook("a", 0, { dispatch_order: undefined })], { now: NOW });
+    expect(m?.dispatchOrder).toBe(0);
+  });
+});
+
+describe("nextRuntimeOrder", () => {
+  const m = (id: string, ...runtimeIds: string[]) => ({
+    id,
+    runtimes: runtimeIds.map((rid) => makeRuntime({ id: rid })),
+  });
+  const ordered = [m("a", "rt-a"), m("b", "rt-b"), m("c", "rt-c")];
+
+  it("writes the full runtime id list in the new order", () => {
+    expect(nextRuntimeOrder(ordered, "c", "a")).toEqual(["rt-c", "rt-a", "rt-b"]);
+    expect(nextRuntimeOrder(ordered, "a", "c")).toEqual(["rt-b", "rt-c", "rt-a"]);
+  });
+
+  it("is null when nothing moves or an id is unknown", () => {
+    expect(nextRuntimeOrder(ordered, "a", "a")).toBeNull();
+    expect(nextRuntimeOrder(ordered, "a", "daemon")).toBeNull();
+  });
+});
+
+describe("webhookMachineHealthText", () => {
+  const t = (sel: (x: never) => string, opts?: Record<string, unknown>) => {
+    const key = sel({
+      machine: { placement: { running_of: "running_of", running: "running", checked: "checked" } },
+    } as never);
+    return `${key}:${JSON.stringify(opts ?? {})}`;
+  };
+  const timeAgo = (iso: string) => `ago(${iso})`;
+
+  it("shows running/cap when capped, running alone when not", () => {
+    expect(
+      webhookMachineHealthText(
+        { health: "online", runningCount: 1, maxConcurrentTasks: 3, downReason: null, availabilityCheckedAt: null },
+        "Online", timeAgo, t as never,
+      ),
+    ).toEqual({ primary: 'Online · running_of:{"running":1,"cap":3}', secondary: null });
+    expect(
+      webhookMachineHealthText(
+        { health: "online", runningCount: 2, maxConcurrentTasks: null, downReason: null, availabilityCheckedAt: null },
+        "Online", timeAgo, t as never,
+      ),
+    ).toEqual({ primary: 'Online · running:{"running":2}', secondary: null });
+  });
+
+  it("shows the reason and the check time when down, the label alone when out of rotation", () => {
+    expect(
+      webhookMachineHealthText(
+        { health: "down", runningCount: 0, maxConcurrentTasks: 3, downReason: "no online runner", availabilityCheckedAt: "2026-09-20T12:00:00Z" },
+        "Offline", timeAgo, t as never,
+      ),
+    ).toEqual({ primary: "Offline — no online runner", secondary: 'checked:{"when":"ago(2026-09-20T12:00:00Z)"}' });
+    expect(
+      webhookMachineHealthText(
+        { health: "out_of_rotation", runningCount: 0, maxConcurrentTasks: 0, downReason: null, availabilityCheckedAt: null },
+        "Out of rotation", timeAgo, t as never,
+      ),
+    ).toEqual({ primary: "Out of rotation", secondary: null });
   });
 });

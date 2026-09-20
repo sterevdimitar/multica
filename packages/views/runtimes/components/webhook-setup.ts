@@ -111,7 +111,11 @@ export function buildWebhookSetup(input: WebhookSetupInput): WebhookSetup {
     "done",
   ].join("\n");
 
-  const env = `printf 'REPO_URL=https://github.com/${repo}\\nACCESS_TOKEN=%s\\nRUNNER_LABEL=${label}\\n' "$(gh auth token)" > .env && chmod 600 .env`;
+  // The runtime token, not a PAT: the control plane mints the registration
+  // token from it (dev-command-center design 2026-09-20), so no GitHub
+  // credential lives on the machine. <RUNTIME_TOKEN> is a literal placeholder
+  // like the two in the register step; the board's owner supplies the value.
+  const env = `printf 'REPO_URL=https://github.com/${repo}\\nDCC_RUNTIME_URL=${server}\\nDCC_RUNTIME_TOKEN=<RUNTIME_TOKEN>\\nRUNNER_LABEL=${label}\\n' > .env && chmod 600 .env`;
 
   const up = "docker compose up -d --build";
 

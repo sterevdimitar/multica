@@ -76,6 +76,8 @@ describe("IssueProgressHoverContent", () => {
           cost_usd: 0.157,
           max_turns: 0,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
         {
@@ -90,6 +92,8 @@ describe("IssueProgressHoverContent", () => {
           cost_usd: null,
           max_turns: 0,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: true,
         },
       ],
@@ -129,6 +133,8 @@ describe("IssueProgressHoverContent", () => {
           cost_usd: null,
           max_turns: 0,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: true,
         },
       ],
@@ -159,6 +165,8 @@ describe("IssueProgressHoverContent", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
         {
@@ -173,6 +181,8 @@ describe("IssueProgressHoverContent", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
         {
@@ -187,6 +197,8 @@ describe("IssueProgressHoverContent", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
       ],
@@ -218,6 +230,8 @@ describe("IssueProgressHoverContent", () => {
           turns: 21,
           max_turns: 20,
           failure_reason: "claude-max-turns",
+          runtime_name: "",
+          off_home: false,
           cost_usd: null,
           is_live: false,
         },
@@ -233,6 +247,8 @@ describe("IssueProgressHoverContent", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
       ],
@@ -268,6 +284,8 @@ describe("IssueProgressHoverContent", () => {
           cost_usd: 0.06,
           max_turns: 0,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
         {
@@ -282,6 +300,8 @@ describe("IssueProgressHoverContent", () => {
           cost_usd: null,
           max_turns: 0,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: true,
         },
       ],
@@ -321,6 +341,8 @@ describe("IssueProgressHoverContent", () => {
           cost_usd: 0.004,
           max_turns: 0,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
       ],
@@ -358,6 +380,8 @@ describe("IssueProgressHoverContent", () => {
           cost_usd: 0.004,
           max_turns: 0,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
       ],
@@ -391,6 +415,8 @@ describe("IssueProgressHoverContent", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
       ],
@@ -419,6 +445,8 @@ describe("IssueProgressHoverContent", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
       ],
@@ -448,6 +476,8 @@ describe("IssueProgressHoverContent", () => {
         max_turns: 0,
         is_live: false,
         failure_reason: "",
+        runtime_name: "",
+        off_home: false,
       })),
       expected_steps: null,
       server_now: "2026-08-22T10:11:30Z",
@@ -476,6 +506,8 @@ describe("IssueProgressHoverContent", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: true,
         },
       ],
@@ -489,6 +521,54 @@ describe("IssueProgressHoverContent", () => {
 
     expect(rowCells("fixer")[1]).toBe("0:00");
     expect(screen.queryByText("1:30")).toBeNull();
+  });
+});
+
+// Runtime placement (2026-09-20): a step that ran off its agent's runtime
+// says where, next to its name; a step at home says nothing.
+describe("IssueProgressHoverContent — off home", () => {
+  it("appends · on <runtime> to a failed-over step only", () => {
+    mockState.progress = {
+      tasks: [
+        {
+          task_id: "t1",
+          agent_name: "review-agent",
+          status: "completed",
+          queued_at: "2026-08-22T10:00:00Z",
+          started_at: "2026-08-22T10:00:00Z",
+          completed_at: "2026-08-22T10:04:00Z",
+          tokens: tokens(30_000, 8_000, 234, 900_000),
+          turns: 14,
+          cost_usd: 0.157,
+          max_turns: 0,
+          failure_reason: "",
+          runtime_name: "Local PC",
+          off_home: false,
+          is_live: false,
+        },
+        {
+          task_id: "t2",
+          agent_name: "fixer",
+          status: "completed",
+          queued_at: "2026-08-22T10:09:00Z",
+          started_at: "2026-08-22T10:10:00Z",
+          completed_at: "2026-08-22T10:12:00Z",
+          tokens: tokens(1_000, 200, 34, 5_000),
+          turns: 3,
+          cost_usd: 0.01,
+          max_turns: 0,
+          failure_reason: "",
+          runtime_name: "CircleCI",
+          off_home: true,
+          is_live: false,
+        },
+      ],
+      expected_steps: null,
+      server_now: "2026-08-22T10:13:00Z",
+    };
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+    expect(rowCells("fixer")[0]).toBe("✓fixer· on CircleCI");
+    expect(rowCells("review")[0]).toBe("✓review");
   });
 });
 
@@ -539,6 +619,8 @@ describe("IssueProgressHoverContent — no runs", () => {
           max_turns: 0,
           cost_usd: null,
           failure_reason: "",
+          runtime_name: "",
+          off_home: false,
           is_live: false,
         },
       ],

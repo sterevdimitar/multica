@@ -102,3 +102,39 @@ describe("deriveRuntimeHealth", () => {
     ).toBe("offline");
   });
 });
+
+// Webhook runtimes (runtime placement, 2026-09-20): no heartbeat, so the
+// health is the placement's — cap 0, the cool-down, else online. The
+// placement columns are ignored on a daemon row.
+describe("deriveRuntimeHealth — webhook runtimes", () => {
+  const now = Date.parse("2026-09-20T12:00:00Z");
+  const webhook = (extra: Partial<AgentRuntime>): AgentRuntime =>
+    makeRuntime({ runtime_mode: "webhook", status: "online", ...extra });
+
+  it("is online with no cap and no cool-down", () => {
+    expect(deriveRuntimeHealth(webhook({}), now)).toBe("online");
+    expect(deriveRuntimeHealth(webhook({ max_concurrent_tasks: null }), now)).toBe("online");
+    expect(deriveRuntimeHealth(webhook({ max_concurrent_tasks: 3 }), now)).toBe("online");
+  });
+
+  it("is out of the rotation at cap 0", () => {
+    expect(deriveRuntimeHealth(webhook({ max_concurrent_tasks: 0 }), now)).toBe("out_of_rotation");
+  });
+
+  it("is down while down_until is in the future, online once it has passed", () => {
+    expect(deriveRuntimeHealth(webhook({ down_until: "2026-09-20T12:01:00Z" }), now)).toBe("down");
+    expect(deriveRuntimeHealth(webhook({ down_until: "2026-09-20T11:59:00Z" }), now)).toBe("online");
+    expect(deriveRuntimeHealth(webhook({ down_until: null }), now)).toBe("online");
+  });
+
+  it("cap 0 wins over a cool-down", () => {
+    expect(
+      deriveRuntimeHealth(webhook({ max_concurrent_tasks: 0, down_until: "2026-09-20T12:01:00Z" }), now),
+    ).toBe("out_of_rotation");
+  });
+
+  it("ignores the placement columns on a daemon row", () => {
+    const daemon = makeRuntime({ status: "online", down_until: "2026-09-20T12:01:00Z", max_concurrent_tasks: 0 });
+    expect(deriveRuntimeHealth(daemon, now)).toBe("online");
+  });
+});
