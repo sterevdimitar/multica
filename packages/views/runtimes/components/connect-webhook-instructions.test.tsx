@@ -5,7 +5,7 @@ import { I18nProvider } from "@multica/core/i18n/react";
 import { configStore } from "@multica/core/config";
 import enCommon from "../../locales/en/common.json";
 import enRuntimes from "../../locales/en/runtimes.json";
-import { ConnectWebhookInstructions } from "./connect-webhook-instructions";
+import { ConnectWebhookInstructions, WebhookSecretsDetails } from "./connect-webhook-instructions";
 
 const TEST_RESOURCES = { en: { common: enCommon, runtimes: enRuntimes } };
 
@@ -83,6 +83,26 @@ describe("ConnectWebhookInstructions", () => {
   it("does not show the missing-config note when everything is set", () => {
     const { baseElement } = renderBody();
     expect(baseElement).not.toHaveTextContent("WEBHOOK_RUNTIME_DISPATCH_URL");
+  });
+
+  // The machine gets the runtime token, never a PAT (dev-command-center
+  // design 2026-09-20): the .env step and the secrets list both say so.
+  it("hands out the runtime token in the .env step", () => {
+    const { baseElement } = renderBody({ daemonServerUrl: "https://m.test" });
+    expect(baseElement).toHaveTextContent("DCC_RUNTIME_URL=https://m.test");
+    expect(baseElement).toHaveTextContent("DCC_RUNTIME_TOKEN=<RUNTIME_TOKEN>");
+    expect(baseElement).not.toHaveTextContent("ACCESS_TOKEN=");
+    expect(baseElement).not.toHaveTextContent("gh auth token)");
+  });
+
+  it("names the runtime token among the secrets", () => {
+    const { baseElement } = render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <WebhookSecretsDetails />
+      </I18nProvider>,
+    );
+    expect(baseElement).toHaveTextContent("<RUNTIME_TOKEN> — the runtime token");
+    expect(baseElement).toHaveTextContent("ACCESS_TOKEN=$(gh auth token) instead");
   });
 
   it("re-derives the label as the name changes", () => {

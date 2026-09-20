@@ -153,7 +153,7 @@ export function WebhookSecretsDetails() {
       <ul className="space-y-1.5 border-t px-3 pt-2.5 pb-3 text-[11px] leading-[1.55] text-muted-foreground">
         <li>{t(($) => $.connect.webhook.secret_token)}</li>
         <li>{t(($) => $.connect.webhook.secret_webhook)}</li>
-        <li>{t(($) => $.connect.webhook.secret_gh)}</li>
+        <li>{t(($) => $.connect.webhook.secret_runtime)}</li>
       </ul>
     </details>
   );

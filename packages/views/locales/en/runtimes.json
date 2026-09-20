@@ -228,7 +228,7 @@
       "secrets_summary": "Where the secrets come from",
       "secret_token": "<YOUR_TOKEN> — a Multica token from Settings → Tokens.",
       "secret_webhook": "<WEBHOOK_SECRET> — the shared secret your dispatch service verifies; the same one your existing webhook runtime was registered with.",
-      "secret_gh": "gh auth token is used as the runner's ACCESS_TOKEN; a fine-grained PAT with Administration: read & write on the one repository is the narrower choice.",
+      "secret_runtime": "<RUNTIME_TOKEN> — the runtime token, from the board's owner; the same one the CircleCI stub holds. A repository admin may write ACCESS_TOKEN=$(gh auth token) instead and leave DCC_RUNTIME_TOKEN empty.",
       "success_description": "Runtime registered. Assign it to an agent to start dispatching."
     }
   },

@@ -216,7 +216,7 @@
       "secrets_summary": "シークレットの入手先",
       "secret_token": "<YOUR_TOKEN> — 設定 → トークン で発行した Multica トークン。",
       "secret_webhook": "<WEBHOOK_SECRET> — ディスパッチサービスが検証する共有シークレット。既存の Webhook ランタイムを登録したときと同じものです。",
-      "secret_gh": "gh auth token はランナーの ACCESS_TOKEN として使われます。対象リポジトリ 1 つに Administration: read & write を付けた fine-grained PAT のほうが権限を絞れます。",
+      "secret_runtime": "<RUNTIME_TOKEN> — ボードのオーナーから受け取るランタイムトークンで、CircleCI スタブが使うものと同じです。リポジトリの管理者は代わりに ACCESS_TOKEN=$(gh auth token) を書き、DCC_RUNTIME_TOKEN を空のままにできます。",
       "success_description": "ランタイムを登録しました。エージェントに割り当てるとディスパッチが始まります。"
     }
   },

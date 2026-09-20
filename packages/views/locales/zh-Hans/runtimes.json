@@ -216,7 +216,7 @@
       "secrets_summary": "密钥从哪里来",
       "secret_token": "<YOUR_TOKEN> — 在 设置 → 令牌 中创建的 Multica 令牌。",
       "secret_webhook": "<WEBHOOK_SECRET> — 分发服务用来校验的共享密钥，与注册现有 Webhook 运行时所用的相同。",
-      "secret_gh": "gh auth token 会用作 runner 的 ACCESS_TOKEN；只对该仓库授予 Administration: read & write 的 fine-grained PAT 权限更小。",
+      "secret_runtime": "<RUNTIME_TOKEN> — 由看板所有者提供的运行时令牌，与 CircleCI 存根使用的是同一个。仓库管理员也可改写 ACCESS_TOKEN=$(gh auth token)，并将 DCC_RUNTIME_TOKEN 留空。",
       "success_description": "运行时已注册。将它分配给某个代理即可开始分发。"
     }
   },
