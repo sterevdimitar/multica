@@ -162,6 +162,7 @@
     "section_skills": "Skills",
     "section_integrations": "外部集成",
     "prop_runtime": "运行时",
+    "prop_runtime_hint": "首选运行时。当它不可用时，此代理的运行会按运行时页面上的顺序转到它可用的下一个运行时。",
     "prop_model": "模型",
     "prop_thinking": "思考",
     "prop_visibility": "可见性",

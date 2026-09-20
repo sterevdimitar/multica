@@ -60,6 +60,12 @@ export interface ProgressRow {
    */
   failureReason: string;
   /**
+   * Where the step ran when that is NOT the agent's own runtime — a
+   * failed-over run (runtime placement, 2026-09-20). "" at home, or when
+   * the server predates the field. The first off-home member names it.
+   */
+  offHomeRuntime: string;
+  /**
    * Summed completed_at − started_at over members that have both. null when
    * no member does. The live member contributes nothing — the client adds
    * the ticking part from liveStartedAt.
@@ -172,6 +178,7 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
               costUsd: null,
               maxTurns: 0,
               failureReason: "",
+              offHomeRuntime: "",
               elapsedMs: null,
               wallMs: null,
               liveStartedAt: null,
@@ -183,6 +190,12 @@ export function groupProgressRows(tasks: IssueProgressTask[]): ProgressRow[] {
 
     row.count += 1;
     row.taskIds.push(t.task_id);
+    // Where a failed-over member ran (runtime placement, 2026-09-20). Read
+    // defensively like failure_reason: an older server omits both fields.
+    // Before the live/finished split so a live off-home step is labelled.
+    if (!row.offHomeRuntime && t.off_home === true && typeof t.runtime_name === "string") {
+      row.offHomeRuntime = t.runtime_name;
+    }
     // A member whose figure is all-zero is unmeasured, not free — it
     // contributes nothing, same as an unpriced member's costUsd below.
     const memberTokens = knownTokens(t.tokens);

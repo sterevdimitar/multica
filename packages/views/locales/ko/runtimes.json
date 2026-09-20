@@ -112,6 +112,16 @@
     }
   },
   "detail": {
+    "runs_at_once": {
+      "title": "배치",
+      "label": "동시 실행 수",
+      "placeholder": "제한 없음",
+      "note_containers": "머신의 러너 컨테이너 수 이하로 유지하세요. Multica는 컨테이너를 시작하거나 중지하지 않습니다.",
+      "zero_note": "비워 두면 제한 없음. 0은 이 런타임을 로테이션에서 제외합니다.",
+      "order": "대체 순서 {{total}}개 중 {{rank}}번째 — 런타임 페이지에서 드래그하여 변경",
+      "toast_updated": "동시 실행 수를 업데이트했습니다",
+      "toast_failed": "동시 실행 수를 업데이트하지 못했습니다"
+    },
     "all_runtimes": "모든 런타임",
     "read_only": "읽기 전용",
     "delete_button": "런타임 삭제",

@@ -526,6 +526,7 @@
     "row_todo_hint": "启动智能体"
   },
   "progress": {
+    "on_runtime": "· 于 {{runtime}}",
     "step_of": "第 {{n}} 步，共 {{m}} 步",
     "completed_footer": "已完成",
     "step": "步骤",

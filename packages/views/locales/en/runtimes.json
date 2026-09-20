@@ -116,6 +116,16 @@
     }
   },
   "detail": {
+    "runs_at_once": {
+      "title": "Placement",
+      "label": "Runs at once",
+      "placeholder": "no limit",
+      "note_containers": "Keep this at or below the number of runner containers on the machine; Multica does not start or stop containers.",
+      "zero_note": "Blank means no limit. 0 takes this runtime out of the rotation.",
+      "order": "{{rank}} of {{total}} in the fallback order — drag on the Runtimes page to change",
+      "toast_updated": "Runs at once updated",
+      "toast_failed": "Could not update runs at once"
+    },
     "all_runtimes": "All runtimes",
     "read_only": "Read-only",
     "delete_button": "Delete runtime",

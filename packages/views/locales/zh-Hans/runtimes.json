@@ -112,6 +112,16 @@
     }
   },
   "detail": {
+    "runs_at_once": {
+      "title": "调度",
+      "label": "同时运行数",
+      "placeholder": "不限",
+      "note_containers": "请不要超过机器上的 runner 容器数量；Multica 不会启动或停止容器。",
+      "zero_note": "留空表示不限。0 会将此运行时移出轮换。",
+      "order": "回退顺序第 {{rank}} 位（共 {{total}} 个）— 在运行时页面拖动可更改",
+      "toast_updated": "同时运行数已更新",
+      "toast_failed": "无法更新同时运行数"
+    },
     "all_runtimes": "全部运行时",
     "read_only": "只读",
     "delete_button": "删除运行时",

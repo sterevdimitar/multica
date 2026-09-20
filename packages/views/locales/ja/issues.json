@@ -526,6 +526,7 @@
     "row_todo_hint": "エージェントを開始します"
   },
   "progress": {
+    "on_runtime": "· {{runtime}} で実行",
     "step_of": "ステップ {{n}} / {{m}}",
     "completed_footer": "完了",
     "step": "ステップ",

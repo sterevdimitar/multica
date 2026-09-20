@@ -524,6 +524,54 @@ describe("IssueProgressHoverContent", () => {
   });
 });
 
+// Runtime placement (2026-09-20): a step that ran off its agent's runtime
+// says where, next to its name; a step at home says nothing.
+describe("IssueProgressHoverContent — off home", () => {
+  it("appends · on <runtime> to a failed-over step only", () => {
+    mockState.progress = {
+      tasks: [
+        {
+          task_id: "t1",
+          agent_name: "review-agent",
+          status: "completed",
+          queued_at: "2026-08-22T10:00:00Z",
+          started_at: "2026-08-22T10:00:00Z",
+          completed_at: "2026-08-22T10:04:00Z",
+          tokens: tokens(30_000, 8_000, 234, 900_000),
+          turns: 14,
+          cost_usd: 0.157,
+          max_turns: 0,
+          failure_reason: "",
+          runtime_name: "Local PC",
+          off_home: false,
+          is_live: false,
+        },
+        {
+          task_id: "t2",
+          agent_name: "fixer",
+          status: "completed",
+          queued_at: "2026-08-22T10:09:00Z",
+          started_at: "2026-08-22T10:10:00Z",
+          completed_at: "2026-08-22T10:12:00Z",
+          tokens: tokens(1_000, 200, 34, 5_000),
+          turns: 3,
+          cost_usd: 0.01,
+          max_turns: 0,
+          failure_reason: "",
+          runtime_name: "CircleCI",
+          off_home: true,
+          is_live: false,
+        },
+      ],
+      expected_steps: null,
+      server_now: "2026-08-22T10:13:00Z",
+    };
+    renderContent(<IssueProgressHoverContent issueId="i1" />);
+    expect(rowCells("fixer")[0]).toBe("✓fixer· on CircleCI");
+    expect(rowCells("review")[0]).toBe("✓review");
+  });
+});
+
 describe("IssueProgressHoverContent — no runs", () => {
   it("renders an empty state instead of an empty table", () => {
     mockState.progress = {

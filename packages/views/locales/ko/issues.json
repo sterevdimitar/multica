@@ -526,6 +526,7 @@
     "row_todo_hint": "에이전트 시작"
   },
   "progress": {
+    "on_runtime": "· {{runtime}}에서 실행",
     "step_of": "{{m}}단계 중 {{n}}단계",
     "completed_footer": "완료",
     "step": "단계",

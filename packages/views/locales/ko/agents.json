@@ -162,6 +162,7 @@
     "section_skills": "스킬",
     "section_integrations": "연동",
     "prop_runtime": "런타임",
+    "prop_runtime_hint": "기본 런타임입니다. 다운되면 이 에이전트의 실행은 런타임 페이지의 순서에 따라 사용할 수 있는 다음 런타임으로 갑니다.",
     "prop_model": "모델",
     "prop_thinking": "추론",
     "prop_visibility": "공개 범위",

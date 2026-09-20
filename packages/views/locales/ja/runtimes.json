@@ -112,6 +112,16 @@
     }
   },
   "detail": {
+    "runs_at_once": {
+      "title": "配置",
+      "label": "同時実行数",
+      "placeholder": "制限なし",
+      "note_containers": "マシン上のランナーコンテナ数以下にしてください。Multica はコンテナの起動や停止を行いません。",
+      "zero_note": "空欄は制限なし。0 でこのランタイムをローテーションから外します。",
+      "order": "フォールバック順 {{total}} 中 {{rank}} 番目 — 変更はランタイムページでドラッグ",
+      "toast_updated": "同時実行数を更新しました",
+      "toast_failed": "同時実行数を更新できませんでした"
+    },
     "all_runtimes": "すべてのランタイム",
     "read_only": "読み取り専用",
     "delete_button": "ランタイムを削除",

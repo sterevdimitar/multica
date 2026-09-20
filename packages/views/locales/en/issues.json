@@ -551,6 +551,7 @@
     "row_todo_hint": "starts the agent"
   },
   "progress": {
+    "on_runtime": "· on {{runtime}}",
     "step_of": "Step {{n}} of {{m}}",
     "completed_footer": "Completed",
     "step": "Step",
