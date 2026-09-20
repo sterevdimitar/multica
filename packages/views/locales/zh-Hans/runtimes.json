@@ -94,6 +94,14 @@
     "about_to_gc": {
       "label": "即将清理",
       "description": "离线 6 天以上。如不重连，将在 7 天时自动删除。"
+    },
+    "down": {
+      "label": "离线",
+      "description": "调度未找到可用于此运行时的 runner — 原因显示在单元格中。几分钟后会重试；期间其代理的运行会转到顺序中的下一个运行时。"
+    },
+    "out_of_rotation": {
+      "label": "已移出轮换",
+      "description": "同时运行数为 0。在调高该值之前不会向此处调度任何任务。"
     }
   },
   "detail": {

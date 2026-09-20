@@ -34,6 +34,10 @@ const HEALTH_VISUAL: Record<RuntimeHealth, { dot: string; tone: string }> = {
   recently_lost: { dot: "bg-warning", tone: "bg-warning/10 text-warning" },
   offline: { dot: "bg-muted-foreground/40", tone: "bg-muted text-muted-foreground" },
   about_to_gc: { dot: "bg-destructive", tone: "bg-destructive/10 text-destructive" },
+  // Runtime placement (2026-09-20): a cool-down is transient like a lost
+  // heartbeat; out of the rotation is a deliberate off switch.
+  down: { dot: "bg-warning", tone: "bg-warning/10 text-warning" },
+  out_of_rotation: { dot: "bg-muted-foreground/40", tone: "bg-muted text-muted-foreground" },
 };
 
 export function HealthDot({
@@ -74,6 +78,8 @@ const HEALTH_ICON: Record<
   recently_lost: { Icon: WifiHigh, tone: "text-warning" },
   offline: { Icon: WifiOff, tone: "text-muted-foreground" },
   about_to_gc: { Icon: WifiOff, tone: "text-destructive" },
+  down: { Icon: WifiOff, tone: "text-warning" },
+  out_of_rotation: { Icon: WifiOff, tone: "text-muted-foreground" },
 };
 
 export function HealthIcon({
@@ -98,6 +104,8 @@ const HEALTH_LABEL_EN: Record<RuntimeHealth, string> = {
   recently_lost: "Recently lost",
   offline: "Offline",
   about_to_gc: "About to GC",
+  down: "Offline",
+  out_of_rotation: "Out of rotation",
 };
 
 export function healthLabel(health: RuntimeHealth | "loading"): string {

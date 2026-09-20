@@ -1265,11 +1265,29 @@ export class ApiClient {
       custom_name?: string;
       /** Apply custom_name to every runtime on the same machine. */
       apply_to_machine?: boolean;
+      /**
+       * Runs at once on a webhook runtime (runtime placement, 2026-09-20):
+       * null = no limit, 0 = out of the rotation. Omit to leave unchanged —
+       * unlike custom_name, a JSON null here IS a value (clear the cap).
+       */
+      max_concurrent_tasks?: number | null;
     },
   ): Promise<AgentRuntime> {
     return this.fetch(`/api/runtimes/${runtimeId}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
+    });
+  }
+
+  /**
+   * The fallback order of the workspace's webhook runtimes (runtime
+   * placement, 2026-09-20): the FULL id list, in the wanted order. The
+   * server refuses a partial or foreign list. Returns the ordered list.
+   */
+  async reorderRuntimes(wsId: string, runtimeIds: string[]): Promise<AgentRuntime[]> {
+    return this.fetch(`/api/runtimes/order`, {
+      method: "PUT",
+      body: JSON.stringify({ workspace_id: wsId, runtime_ids: runtimeIds }),
     });
   }
 

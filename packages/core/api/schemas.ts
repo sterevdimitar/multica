@@ -876,6 +876,11 @@ export const IssueProgressTaskSchema = z.object({
   // over it and so can a healthy one. Servers that predate the field send
   // nothing and default to "".
   failure_reason: z.string().default(""),
+  // Where the step ran (custom_name ?? name) and whether that differs from
+  // the agent's current runtime — a failed-over run (runtime placement,
+  // 2026-09-20). The popover appends "· on CircleCI" to such a step.
+  runtime_name: z.string().default(""),
+  off_home: z.boolean().default(false),
 }).loose();
 
 export const IssueProgressSchema = z.object({

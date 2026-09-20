@@ -873,6 +873,8 @@ describe("applyTaskUsageToProgressCache", () => {
         max_turns: 0,
         is_live: false,
         failure_reason: "",
+        runtime_name: "",
+        off_home: false,
       },
       {
         task_id: "t2",
@@ -887,6 +889,8 @@ describe("applyTaskUsageToProgressCache", () => {
         max_turns: 0,
         is_live: true,
         failure_reason: "",
+        runtime_name: "",
+        off_home: false,
       },
     ],
     expected_steps: null,

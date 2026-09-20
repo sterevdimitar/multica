@@ -98,6 +98,14 @@
     "about_to_gc": {
       "label": "About to GC",
       "description": "Offline 6+ days. Auto-deleted at 7 days unless it reconnects."
+    },
+    "down": {
+      "label": "Offline",
+      "description": "The placement found no runner for this runtime — the reason is in the cell. Tried again in a few minutes; its agents' runs go to the next runtime in the order meanwhile."
+    },
+    "out_of_rotation": {
+      "label": "Out of rotation",
+      "description": "Runs at once is 0. Nothing is placed here until the number is raised."
     }
   },
   "detail": {
