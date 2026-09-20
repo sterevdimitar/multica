@@ -45,7 +45,9 @@ export interface WebhookSetup {
   steps: WebhookSetupSteps | null;
 }
 
-export const RUNNER_FILES = ["Dockerfile", "docker-compose.yml", ".env.example"] as const;
+// dcc-entrypoint.sh joined on 2026-09-20: the Dockerfile COPYs it (the wrapper
+// that mints the registration token), so a build without it fails.
+export const RUNNER_FILES = ["Dockerfile", "dcc-entrypoint.sh", "docker-compose.yml", ".env.example"] as const;
 
 /**
  * The runs_on label for a runtime name. Matches the dispatch service's
