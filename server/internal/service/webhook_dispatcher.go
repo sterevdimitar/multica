@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,9 +70,93 @@ func DispatchToWebhook(ctx context.Context, target DispatchTarget, payload any, 
 		// Read up to 1 KiB so the error message includes the receiver's
 		// rejection reason without unbounded memory use on adversarial bodies.
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return &WebhookRejectedError{Status: resp.StatusCode, Body: snippet}
+		}
 		return fmt.Errorf("webhook returned %d: %s", resp.StatusCode, snippet)
 	}
 	return nil
+}
+
+// WebhookRejectedError is a 4xx from the receiver: the request was
+// understood and refused. Never retried (runtime placement P10) — a refused
+// dispatch retried three times over ~15 s only delays the placement that
+// must follow. Body is capped at 1 KiB.
+type WebhookRejectedError struct {
+	Status int
+	Body   []byte
+}
+
+func (e *WebhookRejectedError) Error() string {
+	return fmt.Sprintf("webhook returned %d: %s", e.Status, e.Body)
+}
+
+// RuntimeUnavailable reports whether this is the 409 the translator answers
+// when no online runner serves the label (dev-command-center design
+// 2026-09-20-runtime-placement §5.2), and returns its detail line — the
+// text that becomes the runtime's down_reason.
+func (e *WebhookRejectedError) RuntimeUnavailable() (detail string, ok bool) {
+	if e.Status != http.StatusConflict {
+		return "", false
+	}
+	var body struct {
+		Reason string `json:"reason"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(e.Body, &body); err != nil || body.Reason != "runtime_unavailable" {
+		return "", false
+	}
+	return body.Detail, true
+}
+
+// AvailabilityAnswer is the translator's 200 body to the availability probe
+// (design §5.1).
+type AvailabilityAnswer struct {
+	Available bool      `json:"available"`
+	Reason    string    `json:"reason"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+// availabilityEnvelope is the probe body. The event discriminator is routed
+// by the translator after signature verification, beside task.cancelled.
+var availabilityEnvelope = map[string]string{"event": "availability"}
+
+// ProbeWebhookAvailability signs and POSTs the availability envelope to the
+// runtime's URL and decodes the answer. Any non-200 (an older translator
+// answers 400: "envelope missing task or callback"), transport error or
+// undecodable body is an error — and the caller IGNORES errors (P16): a
+// probe that cannot get an answer must not change what it cannot see.
+func ProbeWebhookAvailability(ctx context.Context, target DispatchTarget, client *http.Client, clock func() time.Time) (AvailabilityAnswer, error) {
+	body, err := json.Marshal(availabilityEnvelope)
+	if err != nil {
+		return AvailabilityAnswer{}, fmt.Errorf("marshal envelope: %w", err)
+	}
+	sig := SignWebhook(body, target.Secret, target.RuntimeID, clock())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.URL, bytes.NewReader(body))
+	if err != nil {
+		return AvailabilityAnswer{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Multica-Signature", sig.Header)
+	req.Header.Set("X-Multica-Timestamp", sig.Timestamp)
+	req.Header.Set("X-Multica-Webhook-Id", sig.RuntimeID)
+	if target.EventType != "" {
+		req.Header.Set("X-Multica-Event-Type", target.EventType)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return AvailabilityAnswer{}, fmt.Errorf("post: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return AvailabilityAnswer{}, fmt.Errorf("probe returned %d: %s", resp.StatusCode, snippet)
+	}
+	var answer AvailabilityAnswer
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&answer); err != nil {
+		return AvailabilityAnswer{}, fmt.Errorf("decode answer: %w", err)
+	}
+	return answer, nil
 }
 
 // DispatchWithRetry wraps DispatchToWebhook with exponential backoff. Returns
@@ -91,6 +176,13 @@ func DispatchWithRetry(ctx context.Context, target DispatchTarget, payload any, 
 		if err := DispatchToWebhook(ctx, target, payload, client, clock); err == nil {
 			return nil
 		} else {
+			// A rejection is final: the receiver read the request and said
+			// no, and asking again gets the same answer. Returned as-is —
+			// unwrapped — so the caller can errors.As it.
+			var rejected *WebhookRejectedError
+			if errors.As(err, &rejected) {
+				return rejected
+			}
 			lastErr = err
 		}
 		if i == policy.MaxAttempts-1 {
