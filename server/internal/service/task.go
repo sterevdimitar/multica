@@ -3011,14 +3011,17 @@ func (s *TaskService) FailTaskWithOutput(ctx context.Context, taskID pgtype.UUID
 			// retry chain self-describes (e.g. provider_network → max_attempts=3),
 			// rather than leaking a contradictory attempt=N/max_attempts=2 row.
 			retryMaxAttempts = pgtype.Int4{Int32: retryAttemptCeiling(failureReason, parent.MaxAttempts, webhook), Valid: true}
-			// Defer this attempt when the reason's schedule calls for a backoff
-			// (provider_network's final attempt waits ~5s; the GitHub-unreachable
-			// reasons wait 5 then 10 minutes); a zero delay leaves fire_at NULL
-			// so the child is created immediately-claimable.
-			if delay := retryDelayForAttempt(failureReason, parent.Attempt, webhook); delay > 0 {
-				retryFireAt = pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true}
-			}
-			if agent, aerr := s.Queries.GetAgent(ctx, parent.AgentID); aerr != nil {
+			// The runtime placement's third down_until writer, BEFORE the
+			// alternative is looked for: a dispatch_timeout marks the runtime
+			// the run was placed on down for the cool-down, so the failed
+			// runtime cannot count as its own alternative below. The row has
+			// not been failed yet, so the reason is supplied here.
+			failing := parent
+			failing.FailureReason = pgtype.Text{String: failureReason, Valid: true}
+			s.markRuntimeDownForTask(ctx, failing)
+			alternative := false
+			agent, aerr := s.Queries.GetAgent(ctx, parent.AgentID)
+			if aerr != nil {
 				// Best-effort: a missing overlay is not retry-fatal — the child
 				// simply runs without the Composio overlay.
 				slog.Warn("fail task auto-retry: load agent for overlay failed",
@@ -3026,6 +3029,17 @@ func (s *TaskService) FailTaskWithOutput(ctx context.Context, taskID pgtype.UUID
 					"agent_id", util.UUIDToString(parent.AgentID), "error", aerr)
 			} else {
 				retryOverlay = s.buildRuntimeMCPOverlay(ctx, parent.OriginatorUserID, agent)
+				if failureReason == "dispatch_timeout" && webhook {
+					alternative = s.alternativeRuntimeAvailable(ctx, agent, parent.RuntimeID)
+				}
+			}
+			// Defer this attempt when the reason's schedule calls for a backoff
+			// (provider_network's final attempt waits ~5s; the GitHub-unreachable
+			// reasons wait 5 then 10 minutes — unless a dispatch_timeout has
+			// another runtime to go to, which retries at once); a zero delay
+			// leaves fire_at NULL so the child is created immediately-claimable.
+			if delay := retryDelayWithAlternative(failureReason, parent.Attempt, webhook, alternative); delay > 0 {
+				retryFireAt = pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true}
 			}
 		}
 	}
@@ -3358,6 +3372,20 @@ func retryDelayForAttempt(reason string, failedAttempt int32, webhook bool) time
 	return 0
 }
 
+// retryDelayWithAlternative is retryDelayForAttempt with the placement rule
+// (dev-command-center design 2026-09-20-runtime-placement §3, Retries): a
+// dispatch_timeout whose agent has another available runtime retries at
+// once — an immediately-queued child that placeWebhookTask sends elsewhere,
+// the failed runtime being in its cool-down. Every other case is the
+// schedule unchanged: `timeout` and `push_rejected` are not statements
+// about the runtime.
+func retryDelayWithAlternative(reason string, failedAttempt int32, webhook, alternative bool) time.Duration {
+	if reason == "dispatch_timeout" && webhook && alternative {
+		return 0
+	}
+	return retryDelayForAttempt(reason, failedAttempt, webhook)
+}
+
 func resumeUnsafeFailureReason(reason string) bool {
 	switch reason {
 	// Failures that poison the agent CONVERSATION (not the workdir): resuming
@@ -3442,6 +3470,11 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	if !retryableReasons[reason] {
 		return nil, nil
 	}
+	// The runtime placement's third down_until writer: a dispatch_timeout
+	// marks the runtime the run was placed on down for the cool-down —
+	// whether or not a retry follows, so a runtime that keeps swallowing
+	// dispatches is out of the rotation for a while either way.
+	s.markRuntimeDownForTask(ctx, parent)
 	// Use the reason-aware ceiling, not the raw max_attempts column, so an
 	// orphaned provider_network task recovered on its 2nd attempt is still
 	// allowed its deferred 3rd attempt (retryAttemptCeiling raises the ceiling
@@ -3467,6 +3500,7 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	}
 
 	var runtimeMCPOverlay runtimeMCPOverlayData
+	alternative := false
 	agent, agentErr := s.Queries.GetAgent(ctx, parent.AgentID)
 	if agentErr != nil {
 		// Best-effort: failing to resolve the agent for the overlay is not
@@ -3479,13 +3513,17 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 		)
 	} else {
 		runtimeMCPOverlay = s.buildRuntimeMCPOverlay(ctx, parent.OriginatorUserID, agent)
+		if reason == "dispatch_timeout" && webhook {
+			alternative = s.alternativeRuntimeAvailable(ctx, agent, parent.RuntimeID)
+		}
 	}
 	// Mirror FailTask's in-tx backoff + effective-budget persistence: defer the
 	// final provider_network attempt ~5s via fire_at (zero delay leaves fire_at
 	// NULL for an immediate child), and write the reason-aware ceiling into the
-	// child's max_attempts so the retry chain stays self-consistent.
+	// child's max_attempts so the retry chain stays self-consistent. A
+	// dispatch_timeout with another runtime to go to retries at once.
 	var retryFireAt pgtype.Timestamptz
-	if delay := retryDelayForAttempt(reason, parent.Attempt, webhook); delay > 0 {
+	if delay := retryDelayWithAlternative(reason, parent.Attempt, webhook, alternative); delay > 0 {
 		retryFireAt = pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true}
 	}
 	child, err := s.Queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{

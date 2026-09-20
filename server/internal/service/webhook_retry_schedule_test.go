@@ -104,3 +104,30 @@ func TestPushRejectedResumesTheSession(t *testing.T) {
 		t.Fatal("push_rejected is not retryable")
 	}
 }
+
+// The placement rule on the schedule (runtime placement §3, Retries): a
+// dispatch_timeout with another available runtime retries at once; without
+// one it keeps the 5/10-minute wait; timeout and push_rejected never change.
+func TestRetryDelayWithAlternative(t *testing.T) {
+	cases := []struct {
+		reason      string
+		attempt     int32
+		webhook     bool
+		alternative bool
+		want        time.Duration
+	}{
+		{"dispatch_timeout", 1, true, true, 0},
+		{"dispatch_timeout", 1, true, false, 5 * time.Minute},
+		{"dispatch_timeout", 2, true, true, 0},
+		{"dispatch_timeout", 2, true, false, 10 * time.Minute},
+		{"timeout", 1, true, true, 5 * time.Minute},
+		{"push_rejected", 2, true, true, 10 * time.Minute},
+		{"dispatch_timeout", 1, false, true, 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		if got := retryDelayWithAlternative(tc.reason, tc.attempt, tc.webhook, tc.alternative); got != tc.want {
+			t.Errorf("retryDelayWithAlternative(%q, %d, webhook=%v, alt=%v) = %v, want %v",
+				tc.reason, tc.attempt, tc.webhook, tc.alternative, got, tc.want)
+		}
+	}
+}
