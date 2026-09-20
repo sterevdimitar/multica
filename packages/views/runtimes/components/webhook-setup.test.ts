@@ -85,7 +85,7 @@ describe("buildWebhookSetup", () => {
     expect(full.steps?.fetch).toContain(
       'repos/sterevdimitar/dev-command-center/contents/deployment/local-runner/$f',
     );
-    expect(full.steps?.fetch).toContain("Dockerfile docker-compose.yml .env.example");
+    expect(full.steps?.fetch).toContain("Dockerfile dcc-entrypoint.sh docker-compose.yml .env.example");
     expect(full.steps?.fetch).toContain("mkdir -p ~/local-runner && cd ~/local-runner");
   });
 
