@@ -50,21 +50,21 @@ func TestChoosePlacement(t *testing.T) {
 		want     string // "" = wait
 		offHome  bool
 	}{
-		"home up and free":            {home, []db.AgentRuntime{ci, home}, all, nil, "Local PC", false},
-		"home up, no cap, many runs":  {home, []db.AgentRuntime{ci, home}, all, map[byte]int64{1: 99}, "Local PC", false},
-		"home full is a wait (P2)":    {capped(home, 2), []db.AgentRuntime{ci, home}, all, map[byte]int64{1: 2}, "", false},
-		"home down, first in order":   {down(home), []db.AgentRuntime{ci, laptop, home}, all, nil, "CircleCI", true},
-		"home down, first full":       {down(home), []db.AgentRuntime{capped(ci, 1), laptop}, all, map[byte]int64{2: 1}, "dpm-laptop", true},
-		"home down, order respected":  {down(home), []db.AgentRuntime{laptop, ci}, all, nil, "dpm-laptop", true},
-		"home down, empty set waits":  {down(home), []db.AgentRuntime{ci, laptop}, nil, nil, "", false},
-		"home down, not in set":       {down(home), []db.AgentRuntime{ci, laptop}, []pgtype.UUID{laptop.ID}, nil, "dpm-laptop", true},
-		"home cap 0 is down":          {capped(home, 0), []db.AgentRuntime{home, ci}, all, nil, "CircleCI", true},
-		"fallback cap 0 is skipped":   {down(home), []db.AgentRuntime{capped(ci, 0), laptop}, all, nil, "dpm-laptop", true},
-		"fallback in cool-down":       {down(home), []db.AgentRuntime{down(ci), laptop}, all, nil, "dpm-laptop", true},
-		"every fallback down":         {down(home), []db.AgentRuntime{down(ci), down(laptop)}, all, nil, "", false},
-		"every fallback full":         {down(home), []db.AgentRuntime{capped(ci, 1), capped(laptop, 1)}, all, map[byte]int64{2: 1, 3: 1}, "", false},
-		"fallback without a URL":      {down(home), []db.AgentRuntime{{ID: uuidN(2), Name: "x", RuntimeMode: "webhook"}, laptop}, all, nil, "dpm-laptop", true},
-		"home in order but down":      {down(home), []db.AgentRuntime{home, ci}, all, nil, "CircleCI", true},
+		"home up and free":           {home, []db.AgentRuntime{ci, home}, all, nil, "Local PC", false},
+		"home up, no cap, many runs": {home, []db.AgentRuntime{ci, home}, all, map[byte]int64{1: 99}, "Local PC", false},
+		"home full is a wait (P2)":   {capped(home, 2), []db.AgentRuntime{ci, home}, all, map[byte]int64{1: 2}, "", false},
+		"home down, first in order":  {down(home), []db.AgentRuntime{ci, laptop, home}, all, nil, "CircleCI", true},
+		"home down, first full":      {down(home), []db.AgentRuntime{capped(ci, 1), laptop}, all, map[byte]int64{2: 1}, "dpm-laptop", true},
+		"home down, order respected": {down(home), []db.AgentRuntime{laptop, ci}, all, nil, "dpm-laptop", true},
+		"home down, empty set waits": {down(home), []db.AgentRuntime{ci, laptop}, nil, nil, "", false},
+		"home down, not in set":      {down(home), []db.AgentRuntime{ci, laptop}, []pgtype.UUID{laptop.ID}, nil, "dpm-laptop", true},
+		"home cap 0 is down":         {capped(home, 0), []db.AgentRuntime{home, ci}, all, nil, "CircleCI", true},
+		"fallback cap 0 is skipped":  {down(home), []db.AgentRuntime{capped(ci, 0), laptop}, all, nil, "dpm-laptop", true},
+		"fallback in cool-down":      {down(home), []db.AgentRuntime{down(ci), laptop}, all, nil, "dpm-laptop", true},
+		"every fallback down":        {down(home), []db.AgentRuntime{down(ci), down(laptop)}, all, nil, "", false},
+		"every fallback full":        {down(home), []db.AgentRuntime{capped(ci, 1), capped(laptop, 1)}, all, map[byte]int64{2: 1, 3: 1}, "", false},
+		"fallback without a URL":     {down(home), []db.AgentRuntime{{ID: uuidN(2), Name: "x", RuntimeMode: "webhook"}, laptop}, all, nil, "dpm-laptop", true},
+		"home in order but down":     {down(home), []db.AgentRuntime{home, ci}, all, nil, "CircleCI", true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
